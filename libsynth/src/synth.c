@@ -129,6 +129,25 @@ void synth_reset(synth_t *s)
     s->age_counter = 0;
 }
 
+void synth_set_sample_rate(synth_t *s, float sample_rate)
+{
+    int i;
+
+    if (sample_rate <= 0.0f) {
+        return;
+    }
+    s->sample_rate = sample_rate;
+
+    for (i = 0; i < SYNTH_MAX_VOICES; ++i) {
+        synth_voice_t *v = &s->voices[i];
+
+        v->env.sample_rate = sample_rate;
+        v->filter.sample_rate = sample_rate;
+        voice_apply_filter(s, v); /* filter coefficients are rate dependent */
+    }
+    synth_reset(s);
+}
+
 static synth_voice_t *allocate_voice(synth_t *s, int note)
 {
     synth_voice_t *oldest = &s->voices[0];

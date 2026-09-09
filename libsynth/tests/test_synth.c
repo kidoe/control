@@ -328,6 +328,38 @@ static void test_all_notes_off(void)
     CHECK(synth_active_voices(&s) == 0);
 }
 
+static void test_sample_rate_change_keeps_params_and_tuning(void)
+{
+    synth_t s;
+    float buf[8192];
+    int crossings = 0;
+    float prev = 0.0f;
+    int i;
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_MASTER_GAIN, 0.33f);
+    synth_note_on(&s, 60, 1.0f);
+    synth_render(&s, buf, 64);
+
+    synth_set_sample_rate(&s, 16000.0f);
+    CHECK_NEAR(synth_get_param(&s, SYNTH_PARAM_MASTER_GAIN), 0.33f, 1e-6f);
+    CHECK(synth_active_voices(&s) == 0);
+
+    /* A note at the new rate must still land on A4 = 440 Hz. */
+    synth_set_param(&s, SYNTH_PARAM_FILTER_CUTOFF, 1.0f);
+    synth_note_on(&s, 69, 1.0f);
+    synth_render(&s, buf, 8192);
+    synth_render(&s, buf, 8192);
+
+    for (i = 0; i < 8000; ++i) {
+        if (prev <= 0.0f && buf[i] > 0.0f) {
+            ++crossings;
+        }
+        prev = buf[i];
+    }
+    CHECK(crossings >= 217 && crossings <= 223); /* 440 Hz over half a second at 16 kHz */
+}
+
 static void test_output_is_finite_and_bounded(void)
 {
     synth_t s;
@@ -462,6 +494,7 @@ int main(void)
     test_polyphony_and_stealing();
     test_retrigger_reuses_voice();
     test_all_notes_off();
+    test_sample_rate_change_keeps_params_and_tuning();
     test_output_is_finite_and_bounded();
     test_render_is_deterministic();
     test_param_mapping();

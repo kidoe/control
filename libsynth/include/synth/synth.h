@@ -74,6 +74,10 @@ typedef struct {
 void synth_init(synth_t *s, float sample_rate);
 void synth_reset(synth_t *s); /* silences every voice, keeps parameters */
 
+/* Retune to a new rate, for hosts that only learn the device's rate once the
+   device is open. Silences every voice; parameters are kept. */
+void synth_set_sample_rate(synth_t *s, float sample_rate);
+
 /* Audio. Writes n_frames of mono samples, overwriting `out`. Real-time safe. */
 void synth_render(synth_t *s, float *out, int n_frames);
 
