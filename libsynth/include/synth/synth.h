@@ -30,6 +30,9 @@ typedef enum {
     SYNTH_PARAM_AMP_DECAY,
     SYNTH_PARAM_AMP_SUSTAIN,
     SYNTH_PARAM_AMP_RELEASE,
+    SYNTH_PARAM_FILTER_MODE,
+    SYNTH_PARAM_FILTER_CUTOFF,
+    SYNTH_PARAM_FILTER_Q,
     SYNTH_PARAM_COUNT
 } synth_param_t;
 
@@ -52,6 +55,7 @@ typedef struct {
 typedef struct {
     synth_osc_t osc;
     synth_env_t env;
+    synth_filter_t filter;
     int note;          /* MIDI note number, -1 when the voice is free */
     float velocity;    /* [0, 1] */
     unsigned age;      /* allocation order, drives voice stealing */

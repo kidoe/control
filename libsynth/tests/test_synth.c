@@ -101,6 +101,132 @@ static void test_oscillator_frequency(void)
     CHECK(crossings >= 439 && crossings <= 441);
 }
 
+/* Peak of a unit-amplitude sine after the filter has settled, i.e. the
+   magnitude response at that frequency. */
+static float filter_gain_at(float freq, float cutoff, float q, synth_filter_mode_t mode)
+{
+    synth_filter_t filter;
+    synth_osc_t osc;
+    float p = 0.0f;
+    int i;
+
+    synth_filter_init(&filter, SR);
+    synth_filter_set(&filter, cutoff, q);
+    synth_osc_reset(&osc);
+    synth_osc_set_freq(&osc, freq, SR);
+
+    for (i = 0; i < (int)(SR * 0.2f); ++i) {
+        synth_filter_next(&filter, synth_osc_next(&osc, SYNTH_WAVE_SINE), mode);
+    }
+    for (i = 0; i < (int)(SR * 0.1f); ++i) {
+        float v = fabsf(synth_filter_next(&filter, synth_osc_next(&osc, SYNTH_WAVE_SINE), mode));
+        if (v > p) {
+            p = v;
+        }
+    }
+    return p;
+}
+
+static void test_filter_lowpass_response(void)
+{
+    CHECK_NEAR(filter_gain_at(100.0f, 5000.0f, 0.707f, SYNTH_FILTER_LOWPASS), 1.0f, 0.05f);
+    /* Butterworth Q, so the cutoff is the -3 dB point. */
+    CHECK_NEAR(filter_gain_at(1000.0f, 1000.0f, 0.707f, SYNTH_FILTER_LOWPASS), 0.7071f, 0.01f);
+    /* Two poles: an octave up should cost about 12 dB. */
+    CHECK_NEAR(filter_gain_at(2000.0f, 1000.0f, 0.707f, SYNTH_FILTER_LOWPASS), 0.243f, 0.02f);
+    CHECK(filter_gain_at(8000.0f, 400.0f, 0.707f, SYNTH_FILTER_LOWPASS) < 0.02f);
+
+    /* The -3 dB point must land on the requested cutoff across the whole range,
+       which is what the tan approximation in the prewarping has to get right. */
+    CHECK_NEAR(filter_gain_at(50.0f, 50.0f, 0.707f, SYNTH_FILTER_LOWPASS), 0.7071f, 0.01f);
+    CHECK_NEAR(filter_gain_at(15000.0f, 15000.0f, 0.707f, SYNTH_FILTER_LOWPASS), 0.7071f, 0.02f);
+}
+
+static void test_filter_highpass_response(void)
+{
+    CHECK_NEAR(filter_gain_at(8000.0f, 400.0f, 0.707f, SYNTH_FILTER_HIGHPASS), 1.0f, 0.05f);
+    CHECK(filter_gain_at(100.0f, 5000.0f, 0.707f, SYNTH_FILTER_HIGHPASS) < 0.02f);
+}
+
+static void test_filter_bandpass_response(void)
+{
+    float centre = filter_gain_at(1000.0f, 1000.0f, 4.0f, SYNTH_FILTER_BANDPASS);
+
+    CHECK(centre > filter_gain_at(100.0f, 1000.0f, 4.0f, SYNTH_FILTER_BANDPASS) * 4.0f);
+    CHECK(centre > filter_gain_at(9000.0f, 1000.0f, 4.0f, SYNTH_FILTER_BANDPASS) * 4.0f);
+}
+
+static void test_filter_resonance(void)
+{
+    float flat = filter_gain_at(1000.0f, 1000.0f, 0.707f, SYNTH_FILTER_LOWPASS);
+    float resonant = filter_gain_at(1000.0f, 1000.0f, 10.0f, SYNTH_FILTER_LOWPASS);
+
+    CHECK(resonant > flat * 4.0f);
+}
+
+static void test_filter_is_stable_at_extremes(void)
+{
+    synth_filter_t filter;
+    synth_osc_t osc;
+    int i;
+
+    synth_filter_init(&filter, SR);
+    synth_filter_set(&filter, 1.0e6f, 100.0f); /* both clamped internally */
+    synth_osc_reset(&osc);
+    synth_osc_set_freq(&osc, 3000.0f, SR);
+
+    for (i = 0; i < (int)(SR * 2.0f); ++i) {
+        float v = synth_filter_next(&filter, synth_osc_next(&osc, SYNTH_WAVE_SQUARE), SYNTH_FILTER_LOWPASS);
+        CHECK(isfinite(v));
+        if (!isfinite(v)) {
+            break;
+        }
+    }
+
+    synth_filter_set(&filter, 0.0f, 0.0f);
+    for (i = 0; i < 1024; ++i) {
+        CHECK(isfinite(synth_filter_next(&filter, 1.0f, SYNTH_FILTER_LOWPASS)));
+    }
+}
+
+static void test_filter_reset_clears_state(void)
+{
+    synth_filter_t filter;
+    int i;
+
+    synth_filter_init(&filter, SR);
+    synth_filter_set(&filter, 800.0f, 8.0f);
+    for (i = 0; i < 256; ++i) {
+        synth_filter_next(&filter, 1.0f, SYNTH_FILTER_LOWPASS);
+    }
+    CHECK(filter.ic1eq != 0.0f || filter.ic2eq != 0.0f);
+
+    synth_filter_reset(&filter);
+    CHECK(filter.ic1eq == 0.0f);
+    CHECK(filter.ic2eq == 0.0f);
+    CHECK_NEAR(synth_filter_next(&filter, 0.0f, SYNTH_FILTER_LOWPASS), 0.0f, 1e-9f);
+}
+
+static void test_filter_shapes_engine_output(void)
+{
+    synth_t open, closed;
+    float buf_open[8192], buf_closed[8192];
+
+    synth_init(&open, SR);
+    synth_init(&closed, SR);
+    synth_set_param(&open, SYNTH_PARAM_OSC_WAVE, 1.0f);
+    synth_set_param(&closed, SYNTH_PARAM_OSC_WAVE, 1.0f);
+    synth_set_param(&open, SYNTH_PARAM_FILTER_CUTOFF, 1.0f);
+    synth_set_param(&closed, SYNTH_PARAM_FILTER_CUTOFF, 0.05f);
+
+    synth_note_on(&open, 72, 1.0f);
+    synth_note_on(&closed, 72, 1.0f);
+    synth_render(&open, buf_open, 8192);
+    synth_render(&closed, buf_closed, 8192);
+
+    CHECK(peak(buf_closed, 8192) < peak(buf_open, 8192) * 0.5f);
+}
+
 static void test_silence_when_idle(void)
 {
     synth_t s;
@@ -323,6 +449,13 @@ int main(void)
     test_sine_accuracy();
     test_oscillator_frequency();
     test_envelope_stages();
+    test_filter_lowpass_response();
+    test_filter_highpass_response();
+    test_filter_bandpass_response();
+    test_filter_resonance();
+    test_filter_is_stable_at_extremes();
+    test_filter_reset_clears_state();
+    test_filter_shapes_engine_output();
     test_silence_when_idle();
     test_note_on_makes_sound();
     test_release_returns_to_silence();

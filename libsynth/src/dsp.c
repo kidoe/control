@@ -185,3 +185,71 @@ float synth_env_next(synth_env_t *env)
 
     return env->level;
 }
+
+/* Pade approximant of tan, exact to ~1e-5 over [0, pi/2), which is the whole
+   usable cutoff range. Keeps the filter's prewarping libm-free. */
+static float synth_tan_pade(float x)
+{
+    float x2 = x * x;
+    float num = 945.0f + x2 * (-105.0f + x2);
+    float den = 945.0f + x2 * (-420.0f + x2 * 15.0f);
+
+    return x * num / den;
+}
+
+void synth_filter_init(synth_filter_t *filter, float sample_rate)
+{
+    filter->sample_rate = (sample_rate > 0.0f) ? sample_rate : 44100.0f;
+    filter->ic1eq = 0.0f;
+    filter->ic2eq = 0.0f;
+    synth_filter_set(filter, 1000.0f, 0.707f);
+}
+
+void synth_filter_set(synth_filter_t *filter, float cutoff_hz, float q)
+{
+    const float max_hz = 0.49f * filter->sample_rate;
+    float g;
+
+    if (cutoff_hz < 1.0f) {
+        cutoff_hz = 1.0f;
+    } else if (cutoff_hz > max_hz) {
+        cutoff_hz = max_hz;
+    }
+    if (q < 0.5f) {
+        q = 0.5f;
+    } else if (q > 40.0f) {
+        q = 40.0f;
+    }
+
+    g = synth_tan_pade(3.14159265f * cutoff_hz / filter->sample_rate);
+    filter->k = 1.0f / q;
+    filter->a1 = 1.0f / (1.0f + g * (g + filter->k));
+    filter->a2 = g * filter->a1;
+    filter->a3 = g * filter->a2;
+}
+
+void synth_filter_reset(synth_filter_t *filter)
+{
+    filter->ic1eq = 0.0f;
+    filter->ic2eq = 0.0f;
+}
+
+float synth_filter_next(synth_filter_t *filter, float in, synth_filter_mode_t mode)
+{
+    float v3 = in - filter->ic2eq;
+    float v1 = filter->a1 * filter->ic1eq + filter->a2 * v3;
+    float v2 = filter->ic2eq + filter->a2 * filter->ic1eq + filter->a3 * v3;
+
+    filter->ic1eq = 2.0f * v1 - filter->ic1eq;
+    filter->ic2eq = 2.0f * v2 - filter->ic2eq;
+
+    switch (mode) {
+    case SYNTH_FILTER_HIGHPASS:
+        return in - filter->k * v1 - v2;
+    case SYNTH_FILTER_BANDPASS:
+        return v1;
+    case SYNTH_FILTER_LOWPASS:
+    default:
+        return v2;
+    }
+}

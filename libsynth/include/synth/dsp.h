@@ -67,6 +67,30 @@ static inline int synth_env_is_active(const synth_env_t *env)
     return env->stage != SYNTH_ENV_IDLE;
 }
 
+typedef enum {
+    SYNTH_FILTER_LOWPASS = 0,
+    SYNTH_FILTER_HIGHPASS,
+    SYNTH_FILTER_BANDPASS,
+    SYNTH_FILTER_COUNT
+} synth_filter_mode_t;
+
+/* Topology-preserving state-variable filter: 12 dB/oct, stable at any cutoff,
+   resonance independent of cutoff, and all three responses from one run. */
+typedef struct {
+    float sample_rate;
+    float a1;
+    float a2;
+    float a3;
+    float k;
+    float ic1eq;
+    float ic2eq;
+} synth_filter_t;
+
+void  synth_filter_init(synth_filter_t *filter, float sample_rate);
+void  synth_filter_set(synth_filter_t *filter, float cutoff_hz, float q);
+void  synth_filter_reset(synth_filter_t *filter); /* clears state, keeps tuning */
+float synth_filter_next(synth_filter_t *filter, float in, synth_filter_mode_t mode);
+
 #ifdef __cplusplus
 }
 #endif
