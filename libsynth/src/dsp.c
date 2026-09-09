@@ -39,6 +39,24 @@ float synth_exp2f(float x)
     return poly * pow2i.f;
 }
 
+/* Polynomial approximation of a band-limited step. A naive saw or square jumps
+   between two samples, which scatters energy all over the spectrum; this adds a
+   two-sample correction either side of each jump and folds most of that energy
+   back where it belongs. Returns 0 away from a discontinuity, and safely 0 when
+   phase_inc is 0. */
+static float poly_blep(float t, float dt)
+{
+    if (t < dt) {
+        t /= dt;
+        return t + t - t * t - 1.0f;
+    }
+    if (t > 1.0f - dt) {
+        t = (t - 1.0f) / dt;
+        return t * t + t + t + 1.0f;
+    }
+    return 0.0f;
+}
+
 void synth_osc_reset(synth_osc_t *osc)
 {
     osc->phase = 0.0f;
@@ -60,14 +78,23 @@ void synth_osc_set_freq(synth_osc_t *osc, float hz, float sample_rate)
 float synth_osc_next(synth_osc_t *osc, synth_wave_t wave)
 {
     float phase = osc->phase;
+    float dt = osc->phase_inc;
+    float half;
     float out;
 
     switch (wave) {
     case SYNTH_WAVE_SAW:
         out = 2.0f * phase - 1.0f;
+        out -= poly_blep(phase, dt);
         break;
     case SYNTH_WAVE_SQUARE:
+        half = phase + 0.5f;
+        if (half >= 1.0f) {
+            half -= 1.0f;
+        }
         out = (phase < 0.5f) ? 1.0f : -1.0f;
+        out += poly_blep(phase, dt);  /* rising edge at 0 */
+        out -= poly_blep(half, dt);   /* falling edge at 0.5 */
         break;
     case SYNTH_WAVE_SINE:
     default:

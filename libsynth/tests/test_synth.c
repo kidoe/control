@@ -80,6 +80,120 @@ static void test_sine_accuracy(void)
     CHECK(worst < 0.002f);
 }
 
+/* Magnitude at one exact frequency, so alias components can be measured where
+   they actually land instead of being smeared across FFT bins. */
+static float goertzel(const float *x, int n, float freq)
+{
+    float w = 2.0f * 3.14159265f * freq / SR;
+    float cw = cosf(w);
+    float sw = sinf(w);
+    float coeff = 2.0f * cw;
+    float s1 = 0.0f, s2 = 0.0f;
+    float real, imag;
+    int i;
+
+    for (i = 0; i < n; ++i) {
+        float s0 = x[i] + coeff * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    real = s1 - s2 * cw;
+    imag = s2 * sw;
+    return sqrtf(real * real + imag * imag) / ((float)n * 0.5f);
+}
+
+#define ALIAS_FRAMES 4096
+
+/* A 3 kHz saw at 44.1 kHz has harmonics past Nyquist that fold back onto these
+   frequencies. None of them is a harmonic of 3 kHz, so any energy there is
+   aliasing and nothing else. */
+static const float k_alias_hz[] = { 900.0f, 2100.0f, 5100.0f, 8100.0f, 11100.0f, 14100.0f };
+#define ALIAS_POINTS ((int)(sizeof(k_alias_hz) / sizeof(k_alias_hz[0])))
+
+static float alias_energy(const float *buf)
+{
+    float sum = 0.0f;
+    int i;
+
+    for (i = 0; i < ALIAS_POINTS; ++i) {
+        sum += goertzel(buf, ALIAS_FRAMES, k_alias_hz[i]);
+    }
+    return sum;
+}
+
+static void render_naive_saw(float *buf, float freq)
+{
+    float phase = 0.0f;
+    float inc = freq / SR;
+    int i;
+
+    for (i = 0; i < ALIAS_FRAMES; ++i) {
+        buf[i] = 2.0f * phase - 1.0f;
+        phase += inc;
+        if (phase >= 1.0f) {
+            phase -= 1.0f;
+        }
+    }
+}
+
+static void render_osc(float *buf, float freq, synth_wave_t wave)
+{
+    synth_osc_t osc;
+    int i;
+
+    synth_osc_reset(&osc);
+    synth_osc_set_freq(&osc, freq, SR);
+    for (i = 0; i < ALIAS_FRAMES; ++i) {
+        buf[i] = synth_osc_next(&osc, wave);
+    }
+}
+
+static void test_polyblep_reduces_saw_aliasing(void)
+{
+    static float blep[ALIAS_FRAMES];
+    static float naive[ALIAS_FRAMES];
+
+    render_osc(blep, 3000.0f, SYNTH_WAVE_SAW);
+    render_naive_saw(naive, 3000.0f);
+
+    CHECK(alias_energy(blep) < alias_energy(naive) * 0.35f);
+
+    /* The tone itself must survive the correction. */
+    CHECK(goertzel(blep, ALIAS_FRAMES, 3000.0f) > goertzel(naive, ALIAS_FRAMES, 3000.0f) * 0.8f);
+    CHECK(goertzel(blep, ALIAS_FRAMES, 6000.0f) > goertzel(naive, ALIAS_FRAMES, 6000.0f) * 0.8f);
+}
+
+static void test_polyblep_reduces_square_aliasing(void)
+{
+    static float blep[ALIAS_FRAMES];
+    float aliased, fundamental;
+
+    render_osc(blep, 3000.0f, SYNTH_WAVE_SQUARE);
+    aliased = goertzel(blep, ALIAS_FRAMES, 2100.0f) + goertzel(blep, ALIAS_FRAMES, 8100.0f);
+    fundamental = goertzel(blep, ALIAS_FRAMES, 3000.0f);
+
+    CHECK(fundamental > 0.5f);
+    CHECK(aliased < fundamental * 0.05f);
+}
+
+static void test_polyblep_leaves_low_notes_alone(void)
+{
+    static float blep[ALIAS_FRAMES];
+    static float naive[ALIAS_FRAMES];
+    float diff = 0.0f;
+    int i;
+
+    /* At 110 Hz the correction spans 2 samples out of 400, so the waveform
+       should be all but identical to the naive one. */
+    render_osc(blep, 110.0f, SYNTH_WAVE_SAW);
+    render_naive_saw(naive, 110.0f);
+
+    for (i = 0; i < ALIAS_FRAMES; ++i) {
+        diff += fabsf(blep[i] - naive[i]);
+    }
+    CHECK(diff / (float)ALIAS_FRAMES < 0.02f);
+}
+
 static void test_oscillator_frequency(void)
 {
     synth_osc_t osc;
@@ -480,6 +594,9 @@ int main(void)
     test_note_to_hz();
     test_sine_accuracy();
     test_oscillator_frequency();
+    test_polyblep_reduces_saw_aliasing();
+    test_polyblep_reduces_square_aliasing();
+    test_polyblep_leaves_low_notes_alone();
     test_envelope_stages();
     test_filter_lowpass_response();
     test_filter_highpass_response();
