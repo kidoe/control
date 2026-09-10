@@ -57,15 +57,70 @@ static float poly_blep(float t, float dt)
     return 0.0f;
 }
 
+/* VOSIM packs a burst of pulses into each period of the fundamental, so how many
+   fit and how much mean level they carry both follow from the pitch. Recomputed
+   whenever either the pitch or the pulse settings move. */
+static void vosim_update(synth_osc_t *osc)
+{
+    float f0 = osc->phase_inc * osc->sample_rate;
+    float width;
+    float sum = 0.0f;
+    float term = 1.0f;
+    int fits;
+    int n;
+
+    if (f0 <= 0.0f || osc->formant_hz <= 0.0f) {
+        osc->pulse_rate = 0.0f;
+        osc->vosim_fitting = 0;
+        osc->vosim_dc = 0.0f;
+        return;
+    }
+
+    /* One pulse lasts 1/formant seconds, which is this fraction of a period. */
+    width = f0 / osc->formant_hz;
+    if (width > 1.0f) {
+        width = 1.0f;
+    }
+
+    fits = (int)(1.0f / width);
+    if (fits < 1) {
+        fits = 1;
+    }
+    osc->vosim_fitting = (osc->vosim_pulses < fits) ? osc->vosim_pulses : fits;
+    if (osc->vosim_fitting < 1) {
+        osc->vosim_fitting = 1;
+    }
+
+    for (n = 0; n < osc->vosim_fitting; ++n) {
+        sum += term;
+        term *= osc->vosim_decay;
+    }
+
+    osc->pulse_rate = 1.0f / width;
+    osc->vosim_dc = 0.5f * width * sum; /* sin^2 averages 0.5 across its pulse */
+}
+
+void synth_osc_init(synth_osc_t *osc, float sample_rate)
+{
+    osc->sample_rate = (sample_rate > 0.0f) ? sample_rate : 44100.0f;
+    osc->phase = 0.0f;
+    osc->phase_inc = 0.0f;
+    osc->formant_hz = 800.0f;
+    osc->vosim_decay = 0.6f;
+    osc->vosim_pulses = 3;
+    osc->wave = SYNTH_WAVE_SINE;
+    synth_osc_set_pd_knee(osc, 0.5f);
+    vosim_update(osc);
+}
+
 void synth_osc_reset(synth_osc_t *osc)
 {
     osc->phase = 0.0f;
-    osc->phase_inc = 0.0f;
 }
 
-void synth_osc_set_freq(synth_osc_t *osc, float hz, float sample_rate)
+void synth_osc_set_freq(synth_osc_t *osc, float hz)
 {
-    float inc = (sample_rate > 0.0f) ? hz / sample_rate : 0.0f;
+    float inc = (osc->sample_rate > 0.0f) ? hz / osc->sample_rate : 0.0f;
 
     if (inc < 0.0f) {
         inc = 0.0f;
@@ -73,16 +128,66 @@ void synth_osc_set_freq(synth_osc_t *osc, float hz, float sample_rate)
         inc = 0.49f;
     }
     osc->phase_inc = inc;
+    vosim_update(osc);
 }
 
-float synth_osc_next(synth_osc_t *osc, synth_wave_t wave)
+void synth_osc_set_pd_knee(synth_osc_t *osc, float knee)
+{
+    float dc;
+    float scale;
+
+    if (knee < 0.02f) {
+        knee = 0.02f;
+    } else if (knee > 0.98f) {
+        knee = 0.98f;
+    }
+    osc->pd_knee = knee;
+    osc->pd_rise = 0.5f / knee;
+    osc->pd_fall = 0.5f / (1.0f - knee);
+
+    /* Bending the phase squeezes the positive half-cycle into a fraction `knee`
+       of the period and stretches the negative half over the rest, which leaves
+       a mean of (2/pi)(2*knee - 1). Left in, it would ride the knee as a moving
+       DC offset. Removing it pushes the peak past 1, so rescale to keep the
+       oscillator's output bounded like every other waveform here. */
+    dc = 0.63661977f * (2.0f * knee - 1.0f);
+    scale = 1.0f / (1.0f + ((dc < 0.0f) ? -dc : dc));
+    osc->pd_scale = scale;
+    osc->pd_offset = dc * scale;
+}
+
+void synth_osc_set_vosim(synth_osc_t *osc, float formant_hz, int pulses, float decay)
+{
+    if (pulses < 1) {
+        pulses = 1;
+    } else if (pulses > SYNTH_VOSIM_MAX_PULSES) {
+        pulses = SYNTH_VOSIM_MAX_PULSES;
+    }
+    if (decay < 0.0f) {
+        decay = 0.0f;
+    } else if (decay > 1.0f) {
+        decay = 1.0f;
+    }
+
+    osc->formant_hz = (formant_hz > 0.0f) ? formant_hz : 1.0f;
+    osc->vosim_pulses = pulses;
+    osc->vosim_decay = decay;
+    vosim_update(osc);
+}
+
+float synth_osc_next(synth_osc_t *osc)
 {
     float phase = osc->phase;
     float dt = osc->phase_inc;
     float half;
+    float warped;
+    float pulse;
+    float amp;
+    int index;
+    int i;
     float out;
 
-    switch (wave) {
+    switch (osc->wave) {
     case SYNTH_WAVE_SAW:
         out = 2.0f * phase - 1.0f;
         out -= poly_blep(phase, dt);
@@ -95,6 +200,33 @@ float synth_osc_next(synth_osc_t *osc, synth_wave_t wave)
         out = (phase < 0.5f) ? 1.0f : -1.0f;
         out += poly_blep(phase, dt);  /* rising edge at 0 */
         out -= poly_blep(half, dt);   /* falling edge at 0.5 */
+        break;
+
+    /* Phase distortion: the sine is untouched, the clock that reads it is not.
+       The phase races through the first half-cycle and crawls through the
+       second, which grows upper harmonics without any filter. */
+    case SYNTH_WAVE_PD:
+        warped = (phase < osc->pd_knee)
+                     ? phase * osc->pd_rise
+                     : 0.5f + (phase - osc->pd_knee) * osc->pd_fall;
+        out = -synth_sin_pi(2.0f * warped - 1.0f) * osc->pd_scale - osc->pd_offset;
+        break;
+
+    /* VOSIM: a burst of sin^2 pulses, each quieter than the last, then silence
+       until the period ends. Pulse duration sets the formant, the period sets
+       the pitch, and the two are independent. */
+    case SYNTH_WAVE_VOSIM:
+        index = (int)(phase * osc->pulse_rate);
+        if (index >= osc->vosim_fitting) {
+            out = -osc->vosim_dc;
+        } else {
+            pulse = synth_sin_pi(phase * osc->pulse_rate - (float)index);
+            amp = 1.0f;
+            for (i = 0; i < index; ++i) {
+                amp *= osc->vosim_decay;
+            }
+            out = pulse * pulse * amp - osc->vosim_dc;
+        }
         break;
     case SYNTH_WAVE_SINE:
     default:

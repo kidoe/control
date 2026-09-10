@@ -65,11 +65,11 @@ static void test_sine_accuracy(void)
     float worst = 0.0f;
     int i;
 
-    synth_osc_reset(&osc);
-    synth_osc_set_freq(&osc, SR / 1024.0f, SR);
+    synth_osc_init(&osc, SR);
+    synth_osc_set_freq(&osc, SR / 1024.0f);
 
     for (i = 0; i < 1024; ++i) {
-        float got = synth_osc_next(&osc, SYNTH_WAVE_SINE);
+        float got = synth_osc_next(&osc);
         float want = sinf(2.0f * 3.14159265f * (float)i / 1024.0f);
         float err = fabsf(got - want);
 
@@ -141,10 +141,11 @@ static void render_osc(float *buf, float freq, synth_wave_t wave)
     synth_osc_t osc;
     int i;
 
-    synth_osc_reset(&osc);
-    synth_osc_set_freq(&osc, freq, SR);
+    synth_osc_init(&osc, SR);
+    osc.wave = wave;
+    synth_osc_set_freq(&osc, freq);
     for (i = 0; i < ALIAS_FRAMES; ++i) {
-        buf[i] = synth_osc_next(&osc, wave);
+        buf[i] = synth_osc_next(&osc);
     }
 }
 
@@ -194,6 +195,229 @@ static void test_polyblep_leaves_low_notes_alone(void)
     CHECK(diff / (float)ALIAS_FRAMES < 0.02f);
 }
 
+static void test_phase_distortion_neutral_at_half(void)
+{
+    static float pd[ALIAS_FRAMES];
+    static float sine[ALIAS_FRAMES];
+    synth_osc_t osc;
+    float worst = 0.0f;
+    int i;
+
+    /* A knee at 0.5 leaves the phase ramp linear, so PD must be a plain sine. */
+    synth_osc_init(&osc, SR);
+    osc.wave = SYNTH_WAVE_PD;
+    synth_osc_set_pd_knee(&osc, 0.5f);
+    synth_osc_set_freq(&osc, 440.0f);
+    for (i = 0; i < ALIAS_FRAMES; ++i) {
+        pd[i] = synth_osc_next(&osc);
+    }
+
+    render_osc(sine, 440.0f, SYNTH_WAVE_SINE);
+    for (i = 0; i < ALIAS_FRAMES; ++i) {
+        float d = fabsf(pd[i] - sine[i]);
+        if (d > worst) {
+            worst = d;
+        }
+    }
+    CHECK(worst < 1e-6f);
+}
+
+static void test_phase_distortion_adds_harmonics(void)
+{
+    static float bent[ALIAS_FRAMES];
+    static float sine[ALIAS_FRAMES];
+    synth_osc_t osc;
+    float bent_high, sine_high;
+    int i;
+
+    synth_osc_init(&osc, SR);
+    osc.wave = SYNTH_WAVE_PD;
+    synth_osc_set_pd_knee(&osc, 0.08f);
+    synth_osc_set_freq(&osc, 220.0f);
+    for (i = 0; i < ALIAS_FRAMES; ++i) {
+        bent[i] = synth_osc_next(&osc);
+    }
+    render_osc(sine, 220.0f, SYNTH_WAVE_SINE);
+
+    /* Upper harmonics appear without any filter being involved. */
+    bent_high = goertzel(bent, ALIAS_FRAMES, 1100.0f) + goertzel(bent, ALIAS_FRAMES, 1540.0f);
+    sine_high = goertzel(sine, ALIAS_FRAMES, 1100.0f) + goertzel(sine, ALIAS_FRAMES, 1540.0f);
+    CHECK(bent_high > sine_high * 20.0f);
+
+    /* The pitch must not move: the fundamental stays put. */
+    CHECK(goertzel(bent, ALIAS_FRAMES, 220.0f) > 0.1f);
+    CHECK(peak(bent, ALIAS_FRAMES) <= 1.001f);
+}
+
+static void test_phase_distortion_is_centred(void)
+{
+    static float buf[ALIAS_FRAMES];
+    synth_osc_t osc;
+    float knees[] = { 0.5f, 0.25f, 0.08f, 0.9f };
+    int k, i;
+
+    /* Bending the phase makes the two half-cycles unequal in length, so the
+       waveform would carry a DC offset that rides the knee control. */
+    for (k = 0; k < 4; ++k) {
+        float mean = 0.0f;
+        int period = (int)(SR / 100.0f);
+        int whole = (ALIAS_FRAMES / period) * period; /* a partial period would bias the mean */
+
+        synth_osc_init(&osc, SR);
+        osc.wave = SYNTH_WAVE_PD;
+        synth_osc_set_pd_knee(&osc, knees[k]);
+        synth_osc_set_freq(&osc, 100.0f);
+        for (i = 0; i < ALIAS_FRAMES; ++i) {
+            buf[i] = synth_osc_next(&osc);
+            CHECK(fabsf(buf[i]) <= 1.001f);
+        }
+        for (i = 0; i < whole; ++i) {
+            mean += buf[i];
+        }
+        CHECK_NEAR(mean / (float)whole, 0.0f, 0.01f);
+    }
+}
+
+/* Frequency of the strongest harmonic inside a fixed band. VOSIM's formant is a
+   local peak, not the global one: the pulse train also carries a lot of energy
+   near the fundamental, exactly as a glottal source does. Searching a band well
+   above the fundamental finds the formant without presupposing where it is. */
+static float band_peak(const float *buf, float f0)
+{
+    float best_mag = 0.0f;
+    float best_hz = 0.0f;
+    int k;
+
+    for (k = 1; (float)k * f0 < 6000.0f; ++k) {
+        float hz = (float)k * f0;
+        float mag;
+
+        if (hz < 500.0f) {
+            continue;
+        }
+        mag = goertzel(buf, ALIAS_FRAMES, hz);
+        if (mag > best_mag) {
+            best_mag = mag;
+            best_hz = hz;
+        }
+    }
+    return best_hz;
+}
+
+static void render_vosim(float *buf, float f0, float formant, int pulses, float decay)
+{
+    synth_osc_t osc;
+    int i;
+
+    synth_osc_init(&osc, SR);
+    osc.wave = SYNTH_WAVE_VOSIM;
+    synth_osc_set_vosim(&osc, formant, pulses, decay);
+    synth_osc_set_freq(&osc, f0);
+    for (i = 0; i < ALIAS_FRAMES; ++i) {
+        buf[i] = synth_osc_next(&osc);
+    }
+}
+
+static void test_vosim_formant_is_independent_of_pitch(void)
+{
+    static float buf[ALIAS_FRAMES];
+
+    /* The whole point of VOSIM: pulse width sets the formant, the period sets
+       the pitch, and moving one must not drag the other. The comb of harmonics
+       only samples the formant every f0 Hz, so that is the resolution limit. */
+    render_vosim(buf, 110.0f, 1500.0f, 4, 0.7f);
+    CHECK_NEAR(band_peak(buf, 110.0f), 1500.0f, 1.5f * 110.0f);
+
+    render_vosim(buf, 220.0f, 1500.0f, 4, 0.7f);
+    CHECK_NEAR(band_peak(buf, 220.0f), 1500.0f, 1.5f * 220.0f);
+
+    render_vosim(buf, 55.0f, 1500.0f, 4, 0.7f);
+    CHECK_NEAR(band_peak(buf, 55.0f), 1500.0f, 150.0f);
+}
+
+static void test_vosim_formant_follows_pulse_width(void)
+{
+    static float buf[ALIAS_FRAMES];
+
+    render_vosim(buf, 110.0f, 800.0f, 4, 0.7f);
+    CHECK_NEAR(band_peak(buf, 110.0f), 800.0f, 1.5f * 110.0f);
+
+    render_vosim(buf, 110.0f, 2500.0f, 4, 0.7f);
+    CHECK_NEAR(band_peak(buf, 110.0f), 2500.0f, 1.5f * 110.0f);
+
+    /* Above the formant the spectrum falls away sharply, which is what makes it
+       read as a resonance rather than as plain brightness. */
+    render_vosim(buf, 110.0f, 1500.0f, 4, 0.7f);
+    CHECK(goertzel(buf, ALIAS_FRAMES, 1430.0f) > goertzel(buf, ALIAS_FRAMES, 2860.0f) * 5.0f);
+}
+
+static void test_vosim_is_centred_and_bounded(void)
+{
+    static float buf[ALIAS_FRAMES];
+    float mean = 0.0f;
+    int i;
+
+    /* A raw sin^2 train is unipolar; the oscillator removes its mean so the
+       engine never emits DC into the filter or the output. */
+    render_vosim(buf, 110.0f, 1200.0f, 3, 0.6f);
+    for (i = 0; i < ALIAS_FRAMES; ++i) {
+        mean += buf[i];
+        CHECK(fabsf(buf[i]) <= 1.0f);
+    }
+    CHECK_NEAR(mean / (float)ALIAS_FRAMES, 0.0f, 0.02f);
+}
+
+static void test_vosim_decay_shapes_the_burst(void)
+{
+    static float flat[ALIAS_FRAMES];
+    static float steep[ALIAS_FRAMES];
+
+    /* With no decay every pulse is full height, so the burst carries more
+       energy than one that fades across the same number of pulses. */
+    render_vosim(flat, 110.0f, 1200.0f, 4, 1.0f);
+    render_vosim(steep, 110.0f, 1200.0f, 4, 0.3f);
+
+    CHECK(goertzel(flat, ALIAS_FRAMES, 1200.0f) > goertzel(steep, ALIAS_FRAMES, 1200.0f));
+}
+
+static void test_vosim_pulses_cannot_overflow_the_period(void)
+{
+    static float buf[ALIAS_FRAMES];
+    int i;
+
+    /* 16 pulses of 1/200 s cannot fit in a 1/110 s period; the oscillator must
+       clamp rather than run past the end of the cycle. */
+    render_vosim(buf, 110.0f, 200.0f, 16, 1.0f);
+    for (i = 0; i < ALIAS_FRAMES; ++i) {
+        CHECK(isfinite(buf[i]));
+        CHECK(fabsf(buf[i]) <= 1.0f);
+    }
+}
+
+static void test_new_waves_reach_the_engine(void)
+{
+    synth_t s;
+    static float buf[4096];
+    float wave_norm;
+
+    /* osc_wave is a stepped parameter, so the two new modes are addressable
+       from a host without any extra API. */
+    wave_norm = (float)SYNTH_WAVE_PD / (float)(SYNTH_WAVE_COUNT - 1);
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_OSC_WAVE, wave_norm);
+    synth_set_param(&s, SYNTH_PARAM_PD_KNEE, 0.9f);
+    synth_note_on(&s, 57, 1.0f);
+    synth_render(&s, buf, 4096);
+    CHECK(peak(buf, 4096) > 0.05f);
+
+    wave_norm = (float)SYNTH_WAVE_VOSIM / (float)(SYNTH_WAVE_COUNT - 1);
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_OSC_WAVE, wave_norm);
+    synth_note_on(&s, 45, 1.0f);
+    synth_render(&s, buf, 4096);
+    CHECK(peak(buf, 4096) > 0.05f);
+}
+
 static void test_oscillator_frequency(void)
 {
     synth_osc_t osc;
@@ -201,11 +425,11 @@ static void test_oscillator_frequency(void)
     float prev = 0.0f;
     int i;
 
-    synth_osc_reset(&osc);
-    synth_osc_set_freq(&osc, 440.0f, SR);
+    synth_osc_init(&osc, SR);
+    synth_osc_set_freq(&osc, 440.0f);
 
     for (i = 0; i < (int)SR; ++i) {
-        float v = synth_osc_next(&osc, SYNTH_WAVE_SINE);
+        float v = synth_osc_next(&osc);
 
         if (prev <= 0.0f && v > 0.0f) {
             ++crossings;
@@ -226,14 +450,14 @@ static float filter_gain_at(float freq, float cutoff, float q, synth_filter_mode
 
     synth_filter_init(&filter, SR);
     synth_filter_set(&filter, cutoff, q);
-    synth_osc_reset(&osc);
-    synth_osc_set_freq(&osc, freq, SR);
+    synth_osc_init(&osc, SR);
+    synth_osc_set_freq(&osc, freq);
 
     for (i = 0; i < (int)(SR * 0.2f); ++i) {
-        synth_filter_next(&filter, synth_osc_next(&osc, SYNTH_WAVE_SINE), mode);
+        synth_filter_next(&filter, synth_osc_next(&osc), mode);
     }
     for (i = 0; i < (int)(SR * 0.1f); ++i) {
-        float v = fabsf(synth_filter_next(&filter, synth_osc_next(&osc, SYNTH_WAVE_SINE), mode));
+        float v = fabsf(synth_filter_next(&filter, synth_osc_next(&osc), mode));
         if (v > p) {
             p = v;
         }
@@ -286,11 +510,11 @@ static void test_filter_is_stable_at_extremes(void)
 
     synth_filter_init(&filter, SR);
     synth_filter_set(&filter, 1.0e6f, 100.0f); /* both clamped internally */
-    synth_osc_reset(&osc);
-    synth_osc_set_freq(&osc, 3000.0f, SR);
+    synth_osc_init(&osc, SR);
+    synth_osc_set_freq(&osc, 3000.0f);
 
     for (i = 0; i < (int)(SR * 2.0f); ++i) {
-        float v = synth_filter_next(&filter, synth_osc_next(&osc, SYNTH_WAVE_SQUARE), SYNTH_FILTER_LOWPASS);
+        float v = synth_filter_next(&filter, synth_osc_next(&osc), SYNTH_FILTER_LOWPASS);
         CHECK(isfinite(v));
         if (!isfinite(v)) {
             break;
@@ -519,7 +743,8 @@ static void test_param_mapping(void)
     CHECK_NEAR(synth_param_denorm(SYNTH_PARAM_MASTER_GAIN, 0.5f), 0.5f, 1e-6f);
 
     CHECK_NEAR(synth_param_denorm(SYNTH_PARAM_OSC_WAVE, 0.0f), 0.0f, 1e-6f);
-    CHECK_NEAR(synth_param_denorm(SYNTH_PARAM_OSC_WAVE, 0.5f), 1.0f, 1e-6f);
+    CHECK_NEAR(synth_param_denorm(SYNTH_PARAM_OSC_WAVE, 0.5f),
+               (float)((SYNTH_WAVE_COUNT - 1) / 2), 1e-6f);
     CHECK_NEAR(synth_param_denorm(SYNTH_PARAM_OSC_WAVE, 1.0f),
                (float)(SYNTH_WAVE_COUNT - 1), 1e-6f);
 
@@ -597,6 +822,15 @@ int main(void)
     test_polyblep_reduces_saw_aliasing();
     test_polyblep_reduces_square_aliasing();
     test_polyblep_leaves_low_notes_alone();
+    test_phase_distortion_neutral_at_half();
+    test_phase_distortion_adds_harmonics();
+    test_phase_distortion_is_centred();
+    test_vosim_formant_is_independent_of_pitch();
+    test_vosim_formant_follows_pulse_width();
+    test_vosim_is_centred_and_bounded();
+    test_vosim_decay_shapes_the_burst();
+    test_vosim_pulses_cannot_overflow_the_period();
+    test_new_waves_reach_the_engine();
     test_envelope_stages();
     test_filter_lowpass_response();
     test_filter_highpass_response();

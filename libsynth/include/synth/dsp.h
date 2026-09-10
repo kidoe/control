@@ -18,17 +18,42 @@ typedef enum {
     SYNTH_WAVE_SINE = 0,
     SYNTH_WAVE_SAW,
     SYNTH_WAVE_SQUARE,
+    SYNTH_WAVE_PD,     /* phase distortion, after the Casio CZ */
+    SYNTH_WAVE_VOSIM,  /* Kaegi & Tempelaars sin^2 pulse train */
     SYNTH_WAVE_COUNT
 } synth_wave_t;
 
+#define SYNTH_VOSIM_MAX_PULSES 16
+
+/* Every waveform here is a pure function of the phase, so the oscillator holds
+   its settings but needs no per-sample state beyond the phase itself. */
 typedef struct {
+    float sample_rate;
     float phase;     /* [0, 1) */
     float phase_inc;
+
+    float pd_knee;   /* breakpoint of the phase warp; 0.5 reproduces a sine */
+    float pd_rise;   /* derived warp slopes, kept out of the sample loop */
+    float pd_fall;
+    float pd_scale;  /* derived: centres the warped wave and bounds it to 1 */
+    float pd_offset;
+
+    float formant_hz;
+    float vosim_decay;
+    float pulse_rate;  /* derived: pulses per period */
+    float vosim_dc;    /* derived: mean of the train, removed to centre it */
+    int vosim_pulses;
+    int vosim_fitting; /* derived: pulses that fit inside one period */
+
+    synth_wave_t wave;
 } synth_osc_t;
 
-void  synth_osc_reset(synth_osc_t *osc);
-void  synth_osc_set_freq(synth_osc_t *osc, float hz, float sample_rate);
-float synth_osc_next(synth_osc_t *osc, synth_wave_t wave);
+void  synth_osc_init(synth_osc_t *osc, float sample_rate);
+void  synth_osc_reset(synth_osc_t *osc); /* phase only, keeps tuning and timbre */
+void  synth_osc_set_freq(synth_osc_t *osc, float hz);
+void  synth_osc_set_pd_knee(synth_osc_t *osc, float knee);
+void  synth_osc_set_vosim(synth_osc_t *osc, float formant_hz, int pulses, float decay);
+float synth_osc_next(synth_osc_t *osc);
 
 typedef enum {
     SYNTH_ENV_IDLE = 0,

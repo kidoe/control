@@ -17,7 +17,12 @@ static const synth_param_info_t k_param_info[SYNTH_PARAM_COUNT] = {
     SYNTH_PARAM_ENTRY("amp_release", 0.001f, 8.0f, 0.35f, SYNTH_CURVE_CUBIC),
     SYNTH_PARAM_ENTRY("filter_mode", 0.0f, (float)(SYNTH_FILTER_COUNT - 1), 0.0f, SYNTH_CURVE_STEPPED),
     SYNTH_PARAM_ENTRY("filter_cutoff", 20.0f, 18000.0f, 1.0f, SYNTH_CURVE_CUBIC),
-    SYNTH_PARAM_ENTRY("filter_q", 0.5f, 15.0f, 0.0f, SYNTH_CURVE_LINEAR)
+    SYNTH_PARAM_ENTRY("filter_q", 0.5f, 15.0f, 0.0f, SYNTH_CURVE_LINEAR),
+    /* Runs downwards: 0 leaves the sine undistorted, 1 bends it hardest. */
+    SYNTH_PARAM_ENTRY("pd_knee", 0.5f, 0.02f, 0.0f, SYNTH_CURVE_LINEAR),
+    SYNTH_PARAM_ENTRY("vosim_formant", 100.0f, 4000.0f, 0.6f, SYNTH_CURVE_CUBIC),
+    SYNTH_PARAM_ENTRY("vosim_pulses", 1.0f, 8.0f, 0.3f, SYNTH_CURVE_STEPPED),
+    SYNTH_PARAM_ENTRY("vosim_decay", 0.0f, 1.0f, 0.6f, SYNTH_CURVE_LINEAR)
 };
 
 static float clamp01(float v)
@@ -78,6 +83,17 @@ static void voice_apply_envelope(synth_t *s, synth_voice_t *v)
     v->env.release = synth_param_denorm(SYNTH_PARAM_AMP_RELEASE, s->params[SYNTH_PARAM_AMP_RELEASE]);
 }
 
+static void voice_apply_osc(synth_t *s, synth_voice_t *v)
+{
+    v->osc.wave = (synth_wave_t)synth_param_denorm(SYNTH_PARAM_OSC_WAVE, s->params[SYNTH_PARAM_OSC_WAVE]);
+    synth_osc_set_pd_knee(&v->osc,
+                          synth_param_denorm(SYNTH_PARAM_PD_KNEE, s->params[SYNTH_PARAM_PD_KNEE]));
+    synth_osc_set_vosim(&v->osc,
+                        synth_param_denorm(SYNTH_PARAM_VOSIM_FORMANT, s->params[SYNTH_PARAM_VOSIM_FORMANT]),
+                        (int)synth_param_denorm(SYNTH_PARAM_VOSIM_PULSES, s->params[SYNTH_PARAM_VOSIM_PULSES]),
+                        synth_param_denorm(SYNTH_PARAM_VOSIM_DECAY, s->params[SYNTH_PARAM_VOSIM_DECAY]));
+}
+
 static void voice_apply_filter(synth_t *s, synth_voice_t *v)
 {
     synth_filter_set(&v->filter,
@@ -99,9 +115,10 @@ void synth_init(synth_t *s, float sample_rate)
     for (i = 0; i < SYNTH_MAX_VOICES; ++i) {
         synth_voice_t *v = &s->voices[i];
 
-        synth_osc_reset(&v->osc);
+        synth_osc_init(&v->osc, s->sample_rate);
         synth_env_init(&v->env, s->sample_rate);
         synth_filter_init(&v->filter, s->sample_rate);
+        voice_apply_osc(s, v);
         voice_apply_envelope(s, v);
         voice_apply_filter(s, v);
         v->note = -1;
@@ -143,7 +160,9 @@ void synth_set_sample_rate(synth_t *s, float sample_rate)
 
         v->env.sample_rate = sample_rate;
         v->filter.sample_rate = sample_rate;
+        v->osc.sample_rate = sample_rate;
         voice_apply_filter(s, v); /* filter coefficients are rate dependent */
+        voice_apply_osc(s, v);    /* so is the VOSIM pulse layout */
     }
     synth_reset(s);
 }
@@ -179,8 +198,9 @@ void synth_note_on(synth_t *s, int note, float velocity)
     v->age = ++s->age_counter;
 
     synth_osc_reset(&v->osc);
-    synth_osc_set_freq(&v->osc, synth_note_to_hz((float)note), s->sample_rate);
+    synth_osc_set_freq(&v->osc, synth_note_to_hz((float)note));
     synth_filter_reset(&v->filter); /* a stolen voice must not ring on into the new note */
+    voice_apply_osc(s, v);
     voice_apply_envelope(s, v);
     voice_apply_filter(s, v);
     synth_env_gate_on(&v->env);
@@ -234,6 +254,7 @@ void synth_set_param(synth_t *s, synth_param_t param, float norm)
 
     /* Edits reach sounding voices, as they did in the JSyn prototype. */
     for (i = 0; i < SYNTH_MAX_VOICES; ++i) {
+        voice_apply_osc(s, &s->voices[i]);
         voice_apply_envelope(s, &s->voices[i]);
         voice_apply_filter(s, &s->voices[i]);
     }
@@ -247,8 +268,6 @@ float synth_get_param(const synth_t *s, synth_param_t param)
 void synth_render(synth_t *s, float *out, int n_frames)
 {
     const float gain = synth_param_denorm(SYNTH_PARAM_MASTER_GAIN, s->params[SYNTH_PARAM_MASTER_GAIN]);
-    const synth_wave_t wave =
-        (synth_wave_t)synth_param_denorm(SYNTH_PARAM_OSC_WAVE, s->params[SYNTH_PARAM_OSC_WAVE]);
     const synth_filter_mode_t mode =
         (synth_filter_mode_t)synth_param_denorm(SYNTH_PARAM_FILTER_MODE, s->params[SYNTH_PARAM_FILTER_MODE]);
     int i, v;
@@ -263,7 +282,7 @@ void synth_render(synth_t *s, float *out, int n_frames)
             if (!synth_env_is_active(&voice->env)) {
                 continue;
             }
-            sample = synth_osc_next(&voice->osc, wave) * synth_env_next(&voice->env) * voice->velocity;
+            sample = synth_osc_next(&voice->osc) * synth_env_next(&voice->env) * voice->velocity;
             sum += synth_filter_next(&voice->filter, sample, mode);
         }
 
