@@ -37,6 +37,14 @@ typedef enum {
     SYNTH_PARAM_VOSIM_FORMANT,
     SYNTH_PARAM_VOSIM_PULSES,
     SYNTH_PARAM_VOSIM_DECAY,
+    SYNTH_PARAM_TERRAIN_RADIUS,
+    SYNTH_PARAM_TERRAIN_RATIO,
+    SYNTH_PARAM_FILTER_ENV_AMOUNT,
+    SYNTH_PARAM_FILTER_ENV_ATTACK,
+    SYNTH_PARAM_FILTER_ENV_DECAY,
+    SYNTH_PARAM_FILTER_ENV_SUSTAIN,
+    SYNTH_PARAM_FILTER_ENV_RELEASE,
+    SYNTH_PARAM_FILTER_KEY_TRACK,
     SYNTH_PARAM_COUNT
 } synth_param_t;
 
@@ -59,8 +67,10 @@ typedef struct {
 typedef struct {
     synth_osc_t osc;
     synth_env_t env;
+    synth_env_t filter_env;
     synth_filter_t filter;
-    int note;          /* MIDI note number, -1 when the voice is free */
+    int note;          /* MIDI note number; stays valid through the release */
+    int held;          /* 1 while the key is down */
     float velocity;    /* [0, 1] */
     unsigned age;      /* allocation order, drives voice stealing */
 } synth_voice_t;
@@ -72,6 +82,7 @@ typedef struct {
     float params[SYNTH_PARAM_COUNT]; /* normalized, [0, 1] */
     synth_voice_t voices[SYNTH_MAX_VOICES];
     unsigned age_counter;
+    int mod_counter; /* paces filter retuning, see SYNTH_MOD_INTERVAL */
 } synth_t;
 
 /* Lifecycle */

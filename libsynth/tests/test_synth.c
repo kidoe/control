@@ -394,6 +394,236 @@ static void test_vosim_pulses_cannot_overflow_the_period(void)
     }
 }
 
+static void test_terrain_is_centred_and_bounded(void)
+{
+    static float buf[ALIAS_FRAMES];
+    synth_osc_t osc;
+    float radii[] = { 0.1f, 0.4f, 0.7f, 1.0f };
+    int ratios[] = { 1, 2, 3 };
+    int r, q, i;
+
+    /* An arbitrary surface has no reason to be centred or to peak at 1, and
+       both depend on the orbit, so the oscillator measures one lap at setup. */
+    for (r = 0; r < 4; ++r) {
+        for (q = 0; q < 3; ++q) {
+            int period = (int)(SR / 100.0f);
+            int whole = (ALIAS_FRAMES / period) * period;
+            float mean = 0.0f;
+            float top = 0.0f;
+
+            synth_osc_init(&osc, SR);
+            osc.wave = SYNTH_WAVE_TERRAIN;
+            synth_osc_set_terrain(&osc, radii[r], ratios[q]);
+            synth_osc_set_freq(&osc, 100.0f);
+            for (i = 0; i < ALIAS_FRAMES; ++i) {
+                buf[i] = synth_osc_next(&osc);
+            }
+            for (i = 0; i < whole; ++i) {
+                mean += buf[i];
+                if (fabsf(buf[i]) > top) {
+                    top = fabsf(buf[i]);
+                }
+            }
+            CHECK_NEAR(mean / (float)whole, 0.0f, 0.02f);
+            CHECK(top <= 1.001f);
+            CHECK(top > 0.5f); /* normalised to actually use the range */
+        }
+    }
+}
+
+static void test_terrain_radius_changes_the_spectrum(void)
+{
+    static float narrow[ALIAS_FRAMES];
+    static float wide[ALIAS_FRAMES];
+    synth_osc_t osc;
+    float narrow_high = 0.0f, wide_high = 0.0f;
+    int i;
+
+    /* The same surface read on a wider orbit is a different waveform, not a
+       louder one: the orbit radius is a timbre control. */
+    synth_osc_init(&osc, SR);
+    osc.wave = SYNTH_WAVE_TERRAIN;
+    synth_osc_set_terrain(&osc, 0.15f, 1);
+    synth_osc_set_freq(&osc, 200.0f);
+    for (i = 0; i < ALIAS_FRAMES; ++i) {
+        narrow[i] = synth_osc_next(&osc);
+    }
+
+    synth_osc_init(&osc, SR);
+    osc.wave = SYNTH_WAVE_TERRAIN;
+    synth_osc_set_terrain(&osc, 0.95f, 1);
+    synth_osc_set_freq(&osc, 200.0f);
+    for (i = 0; i < ALIAS_FRAMES; ++i) {
+        wide[i] = synth_osc_next(&osc);
+    }
+
+    for (i = 2; i <= 8; ++i) {
+        narrow_high += goertzel(narrow, ALIAS_FRAMES, 200.0f * (float)i);
+        wide_high += goertzel(wide, ALIAS_FRAMES, 200.0f * (float)i);
+    }
+    CHECK(wide_high > narrow_high * 1.5f);
+}
+
+static void test_terrain_ratio_changes_the_waveform(void)
+{
+    static float a[ALIAS_FRAMES];
+    static float b[ALIAS_FRAMES];
+    synth_osc_t osc;
+    float diff = 0.0f;
+    int i;
+
+    /* A Lissajous orbit closes on a different path across the same surface. */
+    synth_osc_init(&osc, SR);
+    osc.wave = SYNTH_WAVE_TERRAIN;
+    synth_osc_set_terrain(&osc, 0.8f, 1);
+    synth_osc_set_freq(&osc, 200.0f);
+    for (i = 0; i < ALIAS_FRAMES; ++i) {
+        a[i] = synth_osc_next(&osc);
+    }
+
+    synth_osc_init(&osc, SR);
+    osc.wave = SYNTH_WAVE_TERRAIN;
+    synth_osc_set_terrain(&osc, 0.8f, 3);
+    synth_osc_set_freq(&osc, 200.0f);
+    for (i = 0; i < ALIAS_FRAMES; ++i) {
+        b[i] = synth_osc_next(&osc);
+    }
+
+    for (i = 0; i < ALIAS_FRAMES; ++i) {
+        diff += fabsf(a[i] - b[i]);
+    }
+    CHECK(diff / (float)ALIAS_FRAMES > 0.1f);
+}
+
+/* Cutoff a voice settles on, read back from the engine rather than guessed. */
+static float voice_cutoff_octaves(const synth_t *s)
+{
+    return s->voices[0].filter.a2 / s->voices[0].filter.a1;
+}
+
+static void test_filter_env_opens_and_closes_the_filter(void)
+{
+    synth_t s;
+    static float buf[512];
+    float at_attack, at_sustain;
+
+    /* A positive amount must open the filter at the peak of the envelope and
+       let it fall back to the sustain level. */
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_OSC_WAVE, 1.0f / (float)(SYNTH_WAVE_COUNT - 1));
+    synth_set_param(&s, SYNTH_PARAM_FILTER_CUTOFF, 0.25f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_AMOUNT, 1.0f);   /* +4 octaves */
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_ATTACK, 0.0f);   /* effectively instant */
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_DECAY, 0.3f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_SUSTAIN, 0.0f);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_note_on(&s, 48, 1.0f);
+
+    render_seconds(&s, buf, 512, 0.02f); /* still near the peak of the envelope */
+    at_attack = voice_cutoff_octaves(&s);
+    render_seconds(&s, buf, 512, 1.5f);  /* decayed all the way to sustain 0 */
+    at_sustain = voice_cutoff_octaves(&s);
+
+    CHECK(at_attack > at_sustain * 2.0f);
+}
+
+static void test_filter_env_amount_is_bipolar(void)
+{
+    synth_t s;
+    static float buf[512];
+    float up, down;
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_CUTOFF, 0.4f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_ATTACK, 0.0f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_AMOUNT, 1.0f);
+    synth_note_on(&s, 60, 1.0f);
+    render_seconds(&s, buf, 512, 0.2f);
+    up = voice_cutoff_octaves(&s);
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_CUTOFF, 0.4f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_ATTACK, 0.0f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_AMOUNT, 0.0f); /* -4 octaves */
+    synth_note_on(&s, 60, 1.0f);
+    render_seconds(&s, buf, 512, 0.2f);
+    down = voice_cutoff_octaves(&s);
+
+    CHECK(up > down * 4.0f);
+}
+
+static void test_filter_key_track_follows_pitch(void)
+{
+    synth_t s;
+    static float buf[512];
+    float low, high, flat_low, flat_high;
+
+    /* With full tracking the cutoff should climb an octave when the note does. */
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_CUTOFF, 0.3f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_AMOUNT, 0.5f); /* neutral */
+    synth_set_param(&s, SYNTH_PARAM_FILTER_KEY_TRACK, 1.0f);
+    synth_note_on(&s, 48, 1.0f);
+    render_seconds(&s, buf, 512, 0.05f);
+    low = voice_cutoff_octaves(&s);
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_CUTOFF, 0.3f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_AMOUNT, 0.5f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_KEY_TRACK, 1.0f);
+    synth_note_on(&s, 60, 1.0f);
+    render_seconds(&s, buf, 512, 0.05f);
+    high = voice_cutoff_octaves(&s);
+
+    CHECK(high > low * 1.5f);
+
+    /* With tracking off the note must make no difference at all. */
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_CUTOFF, 0.3f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_AMOUNT, 0.5f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_KEY_TRACK, 0.0f);
+    synth_note_on(&s, 48, 1.0f);
+    render_seconds(&s, buf, 512, 0.05f);
+    flat_low = voice_cutoff_octaves(&s);
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_CUTOFF, 0.3f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_AMOUNT, 0.5f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_KEY_TRACK, 0.0f);
+    synth_note_on(&s, 72, 1.0f);
+    render_seconds(&s, buf, 512, 0.05f);
+    flat_high = voice_cutoff_octaves(&s);
+
+    CHECK_NEAR(flat_low, flat_high, flat_low * 0.01f);
+}
+
+static void test_key_track_survives_note_off(void)
+{
+    synth_t s;
+    static float buf[512];
+    float held_cutoff, released_cutoff;
+
+    /* The release still belongs to the note that was played, so the pitch a
+       voice tracks must outlive the key being let go. */
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_CUTOFF, 0.3f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_AMOUNT, 0.5f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_KEY_TRACK, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_AMP_RELEASE, 0.6f);
+    synth_note_on(&s, 84, 1.0f);
+    render_seconds(&s, buf, 512, 0.1f);
+    held_cutoff = voice_cutoff_octaves(&s);
+
+    synth_note_off(&s, 84);
+    render_seconds(&s, buf, 512, 0.1f);
+    released_cutoff = voice_cutoff_octaves(&s);
+
+    CHECK(synth_active_voices(&s) == 1);
+    CHECK_NEAR(held_cutoff, released_cutoff, held_cutoff * 0.01f);
+}
+
 static void test_new_waves_reach_the_engine(void)
 {
     synth_t s;
@@ -743,8 +973,14 @@ static void test_param_mapping(void)
     CHECK_NEAR(synth_param_denorm(SYNTH_PARAM_MASTER_GAIN, 0.5f), 0.5f, 1e-6f);
 
     CHECK_NEAR(synth_param_denorm(SYNTH_PARAM_OSC_WAVE, 0.0f), 0.0f, 1e-6f);
-    CHECK_NEAR(synth_param_denorm(SYNTH_PARAM_OSC_WAVE, 0.5f),
-               (float)((SYNTH_WAVE_COUNT - 1) / 2), 1e-6f);
+    {
+        /* A stepped parameter always lands on a whole step, and the midpoint
+           lands within half a step of the middle whatever the wave count. */
+        float mid = synth_param_denorm(SYNTH_PARAM_OSC_WAVE, 0.5f);
+
+        CHECK(mid == (float)(int)mid);
+        CHECK(fabsf(mid - 0.5f * (float)(SYNTH_WAVE_COUNT - 1)) <= 0.5f);
+    }
     CHECK_NEAR(synth_param_denorm(SYNTH_PARAM_OSC_WAVE, 1.0f),
                (float)(SYNTH_WAVE_COUNT - 1), 1e-6f);
 
@@ -830,6 +1066,13 @@ int main(void)
     test_vosim_is_centred_and_bounded();
     test_vosim_decay_shapes_the_burst();
     test_vosim_pulses_cannot_overflow_the_period();
+    test_terrain_is_centred_and_bounded();
+    test_terrain_radius_changes_the_spectrum();
+    test_terrain_ratio_changes_the_waveform();
+    test_filter_env_opens_and_closes_the_filter();
+    test_filter_env_amount_is_bipolar();
+    test_filter_key_track_follows_pitch();
+    test_key_track_survives_note_off();
     test_new_waves_reach_the_engine();
     test_envelope_stages();
     test_filter_lowpass_response();

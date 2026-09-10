@@ -57,6 +57,60 @@ static float poly_blep(float t, float dt)
     return 0.0f;
 }
 
+/* sin(2*pi*turns), with turns wrapped into one revolution. */
+static float sin_turn(float turns)
+{
+    turns -= (float)(int)turns;
+    if (turns < 0.0f) {
+        turns += 1.0f;
+    }
+    return -synth_sin_pi(2.0f * turns - 1.0f);
+}
+
+/* The terrain itself: z = (x-y)(x^2-1)(y^2-1), the surface Roads uses to
+   introduce the technique. The orbit's radius picks out a different cross
+   section of it, and each cross section has its own spectrum. */
+static float terrain_height(float x, float y)
+{
+    return (x - y) * (x * x - 1.0f) * (y * y - 1.0f);
+}
+
+static void terrain_point(const synth_osc_t *osc, float phase, float *x, float *y)
+{
+    *x = osc->terrain_radius * sin_turn(phase + 0.25f);
+    *y = osc->terrain_radius * sin_turn(phase * (float)osc->terrain_ratio);
+}
+
+/* An arbitrary surface has no reason to be centred or to peak at 1, and both
+   depend on the orbit. Walking one lap at setup time is cheaper than guessing,
+   and keeps this waveform as well behaved as the others. */
+static void terrain_update(synth_osc_t *osc)
+{
+    const int steps = 256;
+    float sum = 0.0f;
+    float peak = 0.0f;
+    float x, y, z;
+    int i;
+
+    for (i = 0; i < steps; ++i) {
+        terrain_point(osc, (float)i / (float)steps, &x, &y);
+        sum += terrain_height(x, y);
+    }
+    osc->terrain_dc = sum / (float)steps;
+
+    for (i = 0; i < steps; ++i) {
+        terrain_point(osc, (float)i / (float)steps, &x, &y);
+        z = terrain_height(x, y) - osc->terrain_dc;
+        if (z < 0.0f) {
+            z = -z;
+        }
+        if (z > peak) {
+            peak = z;
+        }
+    }
+    osc->terrain_scale = (peak > 1e-6f) ? 1.0f / peak : 0.0f;
+}
+
 /* VOSIM packs a burst of pulses into each period of the fundamental, so how many
    fit and how much mean level they carry both follow from the pitch. Recomputed
    whenever either the pitch or the pulse settings move. */
@@ -110,6 +164,7 @@ void synth_osc_init(synth_osc_t *osc, float sample_rate)
     osc->vosim_pulses = 3;
     osc->wave = SYNTH_WAVE_SINE;
     synth_osc_set_pd_knee(osc, 0.5f);
+    synth_osc_set_terrain(osc, 0.7f, 1);
     vosim_update(osc);
 }
 
@@ -175,6 +230,24 @@ void synth_osc_set_vosim(synth_osc_t *osc, float formant_hz, int pulses, float d
     vosim_update(osc);
 }
 
+void synth_osc_set_terrain(synth_osc_t *osc, float radius, int ratio)
+{
+    if (radius < 0.05f) {
+        radius = 0.05f;
+    } else if (radius > 1.0f) {
+        radius = 1.0f;
+    }
+    if (ratio < 1) {
+        ratio = 1;
+    } else if (ratio > 8) {
+        ratio = 8;
+    }
+
+    osc->terrain_radius = radius;
+    osc->terrain_ratio = ratio;
+    terrain_update(osc);
+}
+
 float synth_osc_next(synth_osc_t *osc)
 {
     float phase = osc->phase;
@@ -183,6 +256,8 @@ float synth_osc_next(synth_osc_t *osc)
     float warped;
     float pulse;
     float amp;
+    float tx;
+    float ty;
     int index;
     int i;
     float out;
@@ -227,6 +302,15 @@ float synth_osc_next(synth_osc_t *osc)
             }
             out = pulse * pulse * amp - osc->vosim_dc;
         }
+        break;
+
+    /* Wave terrain: the phase drives a closed orbit across a fixed surface and
+       the height under it is the sample. Widening the orbit or making it a
+       Lissajous figure changes the timbre in ways that have no description in
+       terms of harmonics. */
+    case SYNTH_WAVE_TERRAIN:
+        terrain_point(osc, phase, &tx, &ty);
+        out = (terrain_height(tx, ty) - osc->terrain_dc) * osc->terrain_scale;
         break;
     case SYNTH_WAVE_SINE:
     default:

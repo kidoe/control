@@ -18,8 +18,9 @@ typedef enum {
     SYNTH_WAVE_SINE = 0,
     SYNTH_WAVE_SAW,
     SYNTH_WAVE_SQUARE,
-    SYNTH_WAVE_PD,     /* phase distortion, after the Casio CZ */
-    SYNTH_WAVE_VOSIM,  /* Kaegi & Tempelaars sin^2 pulse train */
+    SYNTH_WAVE_PD,       /* phase distortion, after the Casio CZ */
+    SYNTH_WAVE_VOSIM,    /* Kaegi & Tempelaars sin^2 pulse train */
+    SYNTH_WAVE_TERRAIN,  /* Mitsuhashi wave terrain: an orbit over a surface */
     SYNTH_WAVE_COUNT
 } synth_wave_t;
 
@@ -45,6 +46,11 @@ typedef struct {
     int vosim_pulses;
     int vosim_fitting; /* derived: pulses that fit inside one period */
 
+    float terrain_radius;
+    float terrain_scale;  /* derived: normalises the orbit to a peak of 1 */
+    float terrain_dc;
+    int terrain_ratio;    /* y advances this many times per x turn */
+
     synth_wave_t wave;
 } synth_osc_t;
 
@@ -53,6 +59,7 @@ void  synth_osc_reset(synth_osc_t *osc); /* phase only, keeps tuning and timbre 
 void  synth_osc_set_freq(synth_osc_t *osc, float hz);
 void  synth_osc_set_pd_knee(synth_osc_t *osc, float knee);
 void  synth_osc_set_vosim(synth_osc_t *osc, float formant_hz, int pulses, float decay);
+void  synth_osc_set_terrain(synth_osc_t *osc, float radius, int ratio);
 float synth_osc_next(synth_osc_t *osc);
 
 typedef enum {
