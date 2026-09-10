@@ -28,7 +28,11 @@ static const int k_demo_notes[] = {
 static void demo_init(demo_t *d, synth_t *s, float sample_rate, float bpm)
 {
     synth_init(s, sample_rate);
-    synth_set_param(s, SYNTH_PARAM_OSC_WAVE, 0.5f);      /* saw */
+    /* osc_wave is a stepped parameter over the whole wave list, so the
+       normalised value has to be derived from the enum. A hardcoded constant
+       silently selects a different waveform as soon as a wave is added. */
+    synth_set_param(s, SYNTH_PARAM_OSC_WAVE,
+                    (float)SYNTH_WAVE_SAW / (float)(SYNTH_WAVE_COUNT - 1));
     synth_set_param(s, SYNTH_PARAM_AMP_ATTACK, 0.15f);
     synth_set_param(s, SYNTH_PARAM_AMP_DECAY, 0.35f);
     synth_set_param(s, SYNTH_PARAM_AMP_SUSTAIN, 0.3f);

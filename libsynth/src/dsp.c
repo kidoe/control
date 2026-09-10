@@ -429,6 +429,28 @@ float synth_env_next(synth_env_t *env)
     return env->level;
 }
 
+void synth_amp_init(synth_amp_t *amp)
+{
+    amp->drive = 0.0f;
+    amp->level = 1.0f;
+}
+
+/* Soft saturation as x(1+d)/(1+d|x|). Picked over the usual cubic or tanh
+   because it is exactly the identity at d = 0, so "clean" really is clean, and
+   because |x| <= 1 guarantees |y| <= 1 for any drive: full scale in stays full
+   scale out however hard it is pushed, with no branch and no clamp. */
+float synth_amp_shape(float x, float drive)
+{
+    float magnitude = (x < 0.0f) ? -x : x;
+
+    return x * (1.0f + drive) / (1.0f + drive * magnitude);
+}
+
+float synth_amp_next(const synth_amp_t *amp, float in, float env_level)
+{
+    return synth_amp_shape(in * env_level * amp->level, amp->drive);
+}
+
 /* Pade approximant of tan, exact to ~1e-5 over [0, pi/2), which is the whole
    usable cutoff range. Keeps the filter's prewarping libm-free. */
 static float synth_tan_pade(float x)

@@ -45,6 +45,8 @@ typedef enum {
     SYNTH_PARAM_FILTER_ENV_SUSTAIN,
     SYNTH_PARAM_FILTER_ENV_RELEASE,
     SYNTH_PARAM_FILTER_KEY_TRACK,
+    SYNTH_PARAM_AMP_DRIVE,
+    SYNTH_PARAM_AMP_VELOCITY,
     SYNTH_PARAM_COUNT
 } synth_param_t;
 
@@ -66,9 +68,10 @@ typedef struct {
 
 typedef struct {
     synth_osc_t osc;
-    synth_env_t env;
-    synth_env_t filter_env;
     synth_filter_t filter;
+    synth_amp_t amp;
+    synth_env_t amp_env;
+    synth_env_t filter_env;
     int note;          /* MIDI note number; stays valid through the release */
     int held;          /* 1 while the key is down */
     float velocity;    /* [0, 1] */

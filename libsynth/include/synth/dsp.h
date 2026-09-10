@@ -118,6 +118,18 @@ typedef struct {
     float ic2eq;
 } synth_filter_t;
 
+/* The output stage: the envelope rides the level going in, so a note distorts
+   hardest at its attack and cleans up as it decays, the way an overdriven amp
+   behaves. */
+typedef struct {
+    float drive; /* 0 is exactly transparent */
+    float level; /* set per note, carries velocity */
+} synth_amp_t;
+
+void  synth_amp_init(synth_amp_t *amp);
+float synth_amp_shape(float x, float drive);
+float synth_amp_next(const synth_amp_t *amp, float in, float env_level);
+
 void  synth_filter_init(synth_filter_t *filter, float sample_rate);
 void  synth_filter_set(synth_filter_t *filter, float cutoff_hz, float q);
 void  synth_filter_reset(synth_filter_t *filter); /* clears state, keeps tuning */

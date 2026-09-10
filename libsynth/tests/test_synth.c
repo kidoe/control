@@ -624,6 +624,153 @@ static void test_key_track_survives_note_off(void)
     CHECK_NEAR(held_cutoff, released_cutoff, held_cutoff * 0.01f);
 }
 
+static void test_amp_shape_is_clean_at_zero_drive(void)
+{
+    int i;
+
+    for (i = -100; i <= 100; ++i) {
+        float x = (float)i / 100.0f;
+        CHECK_NEAR(synth_amp_shape(x, 0.0f), x, 1e-6f);
+    }
+}
+
+static void test_amp_shape_stays_bounded_and_monotone(void)
+{
+    float drives[] = { 0.0f, 0.5f, 3.0f, 12.0f, 100.0f };
+    int d, i;
+
+    for (d = 0; d < 5; ++d) {
+        float previous = -2.0f;
+
+        /* Full scale in must stay full scale out however hard it is driven,
+           and the curve must never fold back on itself. */
+        CHECK_NEAR(synth_amp_shape(1.0f, drives[d]), 1.0f, 1e-6f);
+        CHECK_NEAR(synth_amp_shape(-1.0f, drives[d]), -1.0f, 1e-6f);
+        CHECK_NEAR(synth_amp_shape(0.0f, drives[d]), 0.0f, 1e-9f);
+
+        for (i = -200; i <= 200; ++i) {
+            float y = synth_amp_shape((float)i / 200.0f, drives[d]);
+
+            CHECK(fabsf(y) <= 1.0f + 1e-6f);
+            CHECK(y > previous);
+            previous = y;
+        }
+    }
+}
+
+static void test_amp_drive_adds_odd_harmonics_only(void)
+{
+    static float clean[ALIAS_FRAMES];
+    static float driven[ALIAS_FRAMES];
+    synth_osc_t osc;
+    float third_clean, third_driven, second_driven, fundamental;
+    int i;
+
+    synth_osc_init(&osc, SR);
+    synth_osc_set_freq(&osc, 500.0f);
+    for (i = 0; i < ALIAS_FRAMES; ++i) {
+        float s = synth_osc_next(&osc);
+        clean[i] = s;
+        driven[i] = synth_amp_shape(s, 8.0f);
+    }
+
+    fundamental = goertzel(driven, ALIAS_FRAMES, 500.0f);
+    second_driven = goertzel(driven, ALIAS_FRAMES, 1000.0f);
+    third_clean = goertzel(clean, ALIAS_FRAMES, 1500.0f);
+    third_driven = goertzel(driven, ALIAS_FRAMES, 1500.0f);
+
+    CHECK(third_driven > third_clean * 20.0f);
+    /* The curve is odd, so it cannot produce even harmonics. */
+    CHECK(second_driven < fundamental * 0.01f);
+}
+
+static void test_amp_gates_regardless_of_drive(void)
+{
+    synth_amp_t amp;
+
+    synth_amp_init(&amp);
+    amp.drive = 12.0f;
+    amp.level = 1.0f;
+
+    /* A closed envelope must mean silence, not a quiet distorted signal. */
+    CHECK_NEAR(synth_amp_next(&amp, 1.0f, 0.0f), 0.0f, 1e-9f);
+    CHECK_NEAR(synth_amp_next(&amp, -1.0f, 0.0f), 0.0f, 1e-9f);
+    CHECK(synth_amp_next(&amp, 1.0f, 1.0f) > 0.5f);
+}
+
+static void test_amp_velocity_sensitivity(void)
+{
+    synth_t s;
+    static float soft[4096];
+    static float hard[4096];
+
+    /* At full sensitivity a light touch is quieter. */
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_VELOCITY, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_note_on(&s, 60, 0.25f);
+    synth_render(&s, soft, 4096);
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_VELOCITY, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_note_on(&s, 60, 1.0f);
+    synth_render(&s, hard, 4096);
+    CHECK(peak(soft, 4096) < peak(hard, 4096) * 0.5f);
+
+    /* With sensitivity off the same two touches must be indistinguishable. */
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_VELOCITY, 0.0f);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_note_on(&s, 60, 0.25f);
+    synth_render(&s, soft, 4096);
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_VELOCITY, 0.0f);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_note_on(&s, 60, 1.0f);
+    synth_render(&s, hard, 4096);
+    CHECK(memcmp(soft, hard, sizeof(soft)) == 0);
+}
+
+static void test_amp_sits_after_the_filter(void)
+{
+    synth_t s;
+    static float clean[8192];
+    static float driven[8192];
+    float clean_high = 0.0f, driven_high = 0.0f;
+    int i;
+
+    /* With the filter shut down hard, drive can only put high harmonics back if
+       it runs after the filter. This is what fixes the chain order in place. */
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_OSC_WAVE, 1.0f / (float)(SYNTH_WAVE_COUNT - 1));
+    synth_set_param(&s, SYNTH_PARAM_FILTER_CUTOFF, 0.12f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_AMOUNT, 0.5f);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_AMP_DRIVE, 0.0f);
+    synth_note_on(&s, 40, 1.0f);
+    synth_render(&s, clean, 8192);
+    synth_render(&s, clean, 8192);
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_OSC_WAVE, 1.0f / (float)(SYNTH_WAVE_COUNT - 1));
+    synth_set_param(&s, SYNTH_PARAM_FILTER_CUTOFF, 0.12f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_AMOUNT, 0.5f);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_AMP_DRIVE, 1.0f);
+    synth_note_on(&s, 40, 1.0f);
+    synth_render(&s, driven, 8192);
+    synth_render(&s, driven, 8192);
+
+    for (i = 5; i <= 15; ++i) {
+        float hz = synth_note_to_hz(40.0f) * (float)i;
+        clean_high += goertzel(clean, 8192, hz);
+        driven_high += goertzel(driven, 8192, hz);
+    }
+    CHECK(driven_high > clean_high * 2.0f);
+}
+
 static void test_new_waves_reach_the_engine(void)
 {
     synth_t s;
@@ -1073,6 +1220,12 @@ int main(void)
     test_filter_env_amount_is_bipolar();
     test_filter_key_track_follows_pitch();
     test_key_track_survives_note_off();
+    test_amp_shape_is_clean_at_zero_drive();
+    test_amp_shape_stays_bounded_and_monotone();
+    test_amp_drive_adds_odd_harmonics_only();
+    test_amp_gates_regardless_of_drive();
+    test_amp_velocity_sensitivity();
+    test_amp_sits_after_the_filter();
     test_new_waves_reach_the_engine();
     test_envelope_stages();
     test_filter_lowpass_response();
