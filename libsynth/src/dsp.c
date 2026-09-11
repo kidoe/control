@@ -154,6 +154,27 @@ static void vosim_update(synth_osc_t *osc)
     osc->vosim_dc = 0.5f * width * sum; /* sin^2 averages 0.5 across its pulse */
 }
 
+/* xorshift32: three shifts and three xors, no multiply, which matters on a core
+   that has no multiplier worth the name. */
+static float noise_draw(synth_osc_t *osc)
+{
+    unsigned x = osc->noise_state;
+
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    osc->noise_state = x;
+
+    return (float)(int)x * (1.0f / 2147483648.0f);
+}
+
+void synth_osc_set_noise_seed(synth_osc_t *osc, unsigned seed)
+{
+    osc->noise_state = seed ? seed : 1u; /* xorshift is stuck at zero */
+    osc->noise_from = noise_draw(osc);
+    osc->noise_to = noise_draw(osc);
+}
+
 void synth_osc_init(synth_osc_t *osc, float sample_rate)
 {
     osc->sample_rate = (sample_rate > 0.0f) ? sample_rate : 44100.0f;
@@ -165,6 +186,7 @@ void synth_osc_init(synth_osc_t *osc, float sample_rate)
     osc->wave = SYNTH_WAVE_SINE;
     synth_osc_set_pd_knee(osc, 0.5f);
     synth_osc_set_terrain(osc, 0.7f, 1);
+    synth_osc_set_noise_seed(osc, 0x9E3779B9u);
     vosim_update(osc);
 }
 
@@ -312,6 +334,10 @@ float synth_osc_next(synth_osc_t *osc)
         terrain_point(osc, phase, &tx, &ty);
         out = (terrain_height(tx, ty) - osc->terrain_dc) * osc->terrain_scale;
         break;
+
+    case SYNTH_WAVE_NOISE:
+        out = osc->noise_from + (osc->noise_to - osc->noise_from) * phase;
+        break;
     case SYNTH_WAVE_SINE:
     default:
         out = -synth_sin_pi(2.0f * phase - 1.0f);
@@ -321,8 +347,82 @@ float synth_osc_next(synth_osc_t *osc)
     phase += osc->phase_inc;
     if (phase >= 1.0f) {
         phase -= 1.0f;
+        osc->noise_from = osc->noise_to;
+        osc->noise_to = noise_draw(osc);
     }
     osc->phase = phase;
+
+    return out;
+}
+
+void synth_lfo_init(synth_lfo_t *lfo, float sample_rate, unsigned seed)
+{
+    lfo->sample_rate = (sample_rate > 0.0f) ? sample_rate : 44100.0f;
+    lfo->phase = 0.0f;
+    lfo->phase_inc = 0.0f;
+    lfo->random_state = seed ? seed : 1u;
+    lfo->random_value = 0.0f;
+    lfo->shape = SYNTH_LFO_SINE;
+}
+
+/* frames_per_step is how many samples pass between calls to synth_lfo_next, so
+   the rate stays in hertz however coarsely the host chooses to run it. */
+void synth_lfo_set_rate(synth_lfo_t *lfo, float hz, int frames_per_step)
+{
+    float inc;
+
+    if (hz < 0.0f) {
+        hz = 0.0f;
+    }
+    if (frames_per_step < 1) {
+        frames_per_step = 1;
+    }
+
+    inc = hz * (float)frames_per_step / lfo->sample_rate;
+    if (inc > 0.49f) {
+        inc = 0.49f;
+    }
+    lfo->phase_inc = inc;
+}
+
+void synth_lfo_retrigger(synth_lfo_t *lfo)
+{
+    lfo->phase = 0.0f;
+}
+
+float synth_lfo_next(synth_lfo_t *lfo)
+{
+    float phase = lfo->phase;
+    float out;
+
+    switch (lfo->shape) {
+    case SYNTH_LFO_TRIANGLE:
+        out = (phase < 0.5f) ? (4.0f * phase - 1.0f) : (3.0f - 4.0f * phase);
+        break;
+    case SYNTH_LFO_SQUARE:
+        out = (phase < 0.5f) ? 1.0f : -1.0f;
+        break;
+    case SYNTH_LFO_RANDOM:
+        out = lfo->random_value;
+        break;
+    case SYNTH_LFO_SINE:
+    default:
+        out = -synth_sin_pi(2.0f * phase - 1.0f);
+        break;
+    }
+
+    phase += lfo->phase_inc;
+    if (phase >= 1.0f) {
+        unsigned x = lfo->random_state;
+
+        phase -= 1.0f;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        lfo->random_state = x;
+        lfo->random_value = (float)(int)x * (1.0f / 2147483648.0f);
+    }
+    lfo->phase = phase;
 
     return out;
 }

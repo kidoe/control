@@ -78,6 +78,12 @@ parts is small. What does cost something is that every block scans all
 from 8 to 2 takes eight one-note parts from 0.80% to 0.67%. Size it to what one
 *track* needs, not the whole instrument.
 
+A patch is exactly the normalized parameters, so `synth_save_patch` and
+`synth_load_patch` move one track's sound around as a plain float array with no
+format of its own. It is positional and tied to this build's parameter list;
+anything meant to outlive a version change should store the names from
+`synth_param_info()` beside the values.
+
 Two things the host owns:
 
 - **Headroom.** Each instance is bounded by 1 on its own, so four parts in
@@ -92,10 +98,22 @@ Oscillator, then filter, then amplifier — the classic arrangement, and the
 order the units are actually wired in `synth_render()`.
 
 - **Oscillator**: sine, PolyBLEP saw and square, Casio-style phase distortion,
-  VOSIM pulse trains, wave terrain. Every waveform is a pure function of phase.
+  VOSIM pulse trains, wave terrain, and noise. Every waveform but noise is a
+  pure function of phase; noise draws a random value each cycle and interpolates
+  across it, so the note sets its bandwidth and a high one gives hi-hats. Each
+  voice is seeded from its index, which keeps unison voices uncorrelated without
+  making a render unrepeatable.
 - **Filter**: topology-preserving SVF, low/high/band-pass, with its own DAHDSR
   envelope and key tracking. Retuned every `SYNTH_MOD_INTERVAL` samples because
   recomputing coefficients costs far more than a sample of audio.
+- **LFO**: one per voice, retriggered by its note, running at control rate with
+  sine, triangle, square and sample-and-hold shapes. It reaches the cutoff in
+  octaves, the pitch in semitones and the amplitude as a dip that can only take
+  level away. All three depths ship at exactly zero, so the section changes no
+  existing patch. Vibrato is the one destination that costs anything, since
+  retuning the oscillator recomputes the VOSIM pulse layout, so it is skipped
+  entirely when its depth is zero: 8 voices cost 0.73% of a core with the filter
+  modulated and 0.86% with vibrato as well.
 - **Amplifier**: per-note level, velocity sensitivity, and soft saturation
   `x(1+d)/(1+d|x|)`, which is the identity at `d = 0` and provably keeps
   `|x| <= 1` mapped to `|y| <= 1`.
@@ -111,7 +129,7 @@ cmake --build build
 cd build && ctest --output-on-failure
 ```
 
-71 test functions, 188 assertions, no audio hardware needed. Spectra are
+86 test functions, 219 assertions, no audio hardware needed. Spectra are
 measured with a Goertzel probe at exact frequencies rather than asserted on the
 shape of the code, so the tests survive refactoring and catch real regressions.
 
@@ -137,8 +155,8 @@ Be honest about this line; a lot of it cannot be checked from a container.
 - **Cross-compiles and fits, but has never run**: bare metal ARM. CI builds the
   library and `backends/embedded/rp2040_example.c` for Cortex-M0+ and
   Cortex-M4F with `-Wconversion -Werror` and runs the dependency check on both.
-  Measured at 8 voices: 6.8 KB of flash and 3.9 KB of RAM on M0+, 6.2 KB and
-  3.9 KB on M4F — on an RP2040 that is 0.3% of its flash and 1.5% of its SRAM,
+  Measured at 8 voices: 8.1 KB of flash and 4.3 KB of RAM on M0+, 7.3 KB and
+  4.3 KB on M4F — on an RP2040 that is 0.3% of its flash and 1.5% of its SRAM,
   so memory is not the constraint.
 
   CPU is, and nothing here measures it. An M0+ has no FPU, so each of the

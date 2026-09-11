@@ -21,13 +21,15 @@ typedef enum {
     SYNTH_WAVE_PD,       /* phase distortion, after the Casio CZ */
     SYNTH_WAVE_VOSIM,    /* Kaegi & Tempelaars sin^2 pulse train */
     SYNTH_WAVE_TERRAIN,  /* Mitsuhashi wave terrain: an orbit over a surface */
+    SYNTH_WAVE_NOISE,    /* interpolated random values, after the prototype's RedNoise */
     SYNTH_WAVE_COUNT
 } synth_wave_t;
 
 #define SYNTH_VOSIM_MAX_PULSES 16
 
-/* Every waveform here is a pure function of the phase, so the oscillator holds
-   its settings but needs no per-sample state beyond the phase itself. */
+/* Every waveform here but noise is a pure function of the phase, so apart from
+   the noise generator's own state the oscillator holds settings rather than
+   running state. */
 typedef struct {
     float sample_rate;
     float phase;     /* [0, 1) */
@@ -51,6 +53,14 @@ typedef struct {
     float terrain_dc;
     int terrain_ratio;    /* y advances this many times per x turn */
 
+    /* Noise is the one waveform that cannot be a function of the phase alone.
+       The phase still sets its bandwidth: a new random value is drawn each
+       cycle and interpolated across it, so a low note rumbles and a high one
+       hisses. */
+    unsigned noise_state;
+    float noise_from;
+    float noise_to;
+
     synth_wave_t wave;
 } synth_osc_t;
 
@@ -60,7 +70,36 @@ void  synth_osc_set_freq(synth_osc_t *osc, float hz);
 void  synth_osc_set_pd_knee(synth_osc_t *osc, float knee);
 void  synth_osc_set_vosim(synth_osc_t *osc, float formant_hz, int pulses, float decay);
 void  synth_osc_set_terrain(synth_osc_t *osc, float radius, int ratio);
+
+/* Decorrelates the noise between voices. Any non-zero value will do; the engine
+   seeds each voice from its index so a patch still renders identically twice. */
+void  synth_osc_set_noise_seed(synth_osc_t *osc, unsigned seed);
 float synth_osc_next(synth_osc_t *osc);
+
+typedef enum {
+    SYNTH_LFO_SINE = 0,
+    SYNTH_LFO_TRIANGLE,
+    SYNTH_LFO_SQUARE,
+    SYNTH_LFO_RANDOM,   /* a new level each cycle, held: stepped modulation */
+    SYNTH_LFO_COUNT
+} synth_lfo_shape_t;
+
+/* Deliberately not a synth_osc_t: an oscillator is 76 bytes of settings a
+   modulator has no use for, and this runs at control rate rather than per
+   sample. Output is bipolar, [-1, 1]. */
+typedef struct {
+    float sample_rate;
+    float phase;
+    float phase_inc;
+    unsigned random_state;
+    float random_value;
+    synth_lfo_shape_t shape;
+} synth_lfo_t;
+
+void  synth_lfo_init(synth_lfo_t *lfo, float sample_rate, unsigned seed);
+void  synth_lfo_set_rate(synth_lfo_t *lfo, float hz, int frames_per_step);
+void  synth_lfo_retrigger(synth_lfo_t *lfo);
+float synth_lfo_next(synth_lfo_t *lfo);
 
 typedef enum {
     SYNTH_ENV_IDLE = 0,

@@ -61,6 +61,11 @@ typedef enum {
     SYNTH_PARAM_FILTER_KEY_TRACK,
     SYNTH_PARAM_AMP_DRIVE,
     SYNTH_PARAM_AMP_VELOCITY,
+    SYNTH_PARAM_LFO_RATE,
+    SYNTH_PARAM_LFO_SHAPE,
+    SYNTH_PARAM_LFO_TO_CUTOFF,
+    SYNTH_PARAM_LFO_TO_PITCH,
+    SYNTH_PARAM_LFO_TO_AMP,
     SYNTH_PARAM_COUNT
 } synth_param_t;
 
@@ -86,6 +91,9 @@ typedef struct {
     synth_amp_t amp;
     synth_env_t amp_env;
     synth_env_t filter_env;
+    synth_lfo_t lfo;
+    float amp_base;    /* the velocity part of the amp level, before tremolo */
+    float lfo_value;   /* held between control-rate updates */
     int note;          /* MIDI note number; stays valid through the release */
     int held;          /* 1 while the key is down */
     float velocity;    /* [0, 1] */
@@ -198,6 +206,19 @@ int  synth_active_voices(const synth_t *s);
    a UI slider all map onto them directly. */
 void  synth_set_param(synth_t *s, synth_param_t param, float norm);
 float synth_get_param(const synth_t *s, synth_param_t param);
+
+/*
+ * Patches. A patch is exactly the normalized parameters, so it is a plain array
+ * of floats with no format of its own: a groovebox giving each track its own
+ * sound stores one of these per track.
+ *
+ * The array is positional, tied to the parameter list this build was compiled
+ * with. That is fine to keep in memory or in a session file written and read by
+ * the same binary. To survive a version change, store the names from
+ * synth_param_info() alongside the values and match on those.
+ */
+void synth_save_patch(const synth_t *s, float patch[SYNTH_PARAM_COUNT]);
+void synth_load_patch(synth_t *s, const float patch[SYNTH_PARAM_COUNT]);
 
 /* Descriptors, for hosts that build UI or MIDI maps from the parameter list. */
 const synth_param_info_t *synth_param_info(synth_param_t param);

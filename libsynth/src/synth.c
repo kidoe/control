@@ -35,7 +35,13 @@ static const synth_param_info_t k_param_info[SYNTH_PARAM_COUNT] = {
     SYNTH_PARAM_ENTRY("filter_key_track", 0.0f, 1.0f, 0.0f, SYNTH_CURVE_LINEAR),
     SYNTH_PARAM_ENTRY("amp_drive", 0.0f, 12.0f, 0.0f, SYNTH_CURVE_CUBIC),
     /* 0 ignores how hard the key was struck, 1 gives it full range. */
-    SYNTH_PARAM_ENTRY("amp_velocity", 0.0f, 1.0f, 1.0f, SYNTH_CURVE_LINEAR)
+    SYNTH_PARAM_ENTRY("amp_velocity", 0.0f, 1.0f, 1.0f, SYNTH_CURVE_LINEAR),
+    SYNTH_PARAM_ENTRY("lfo_rate", 0.02f, 40.0f, 0.3f, SYNTH_CURVE_CUBIC),
+    SYNTH_PARAM_ENTRY("lfo_shape", 0.0f, (float)(SYNTH_LFO_COUNT - 1), 0.0f, SYNTH_CURVE_STEPPED),
+    /* Bipolar depths, so the centre of each control is no modulation at all. */
+    SYNTH_PARAM_ENTRY("lfo_to_cutoff", -3.0f, 3.0f, 0.5f, SYNTH_CURVE_LINEAR),
+    SYNTH_PARAM_ENTRY("lfo_to_pitch", -12.0f, 12.0f, 0.5f, SYNTH_CURVE_LINEAR),
+    SYNTH_PARAM_ENTRY("lfo_to_amp", 0.0f, 1.0f, 0.0f, SYNTH_CURVE_LINEAR)
 };
 
 static float clamp01(float v)
@@ -114,12 +120,41 @@ static void voice_apply_osc(synth_t *s, synth_voice_t *v)
                           (int)synth_param_denorm(SYNTH_PARAM_TERRAIN_RATIO, s->params[SYNTH_PARAM_TERRAIN_RATIO]));
 }
 
+/* Tremolo dips from the level rather than lifting past it, so turning the depth
+   up cannot make a patch louder than the one it started from. */
+static void voice_apply_tremolo(synth_t *s, synth_voice_t *v)
+{
+    float depth = synth_param_denorm(SYNTH_PARAM_LFO_TO_AMP, s->params[SYNTH_PARAM_LFO_TO_AMP]);
+
+    v->amp.level = v->amp_base * (1.0f - depth * 0.5f * (1.0f - v->lfo_value));
+}
+
 static void voice_apply_amp(synth_t *s, synth_voice_t *v)
 {
     float sensitivity = synth_param_denorm(SYNTH_PARAM_AMP_VELOCITY, s->params[SYNTH_PARAM_AMP_VELOCITY]);
 
     v->amp.drive = synth_param_denorm(SYNTH_PARAM_AMP_DRIVE, s->params[SYNTH_PARAM_AMP_DRIVE]);
-    v->amp.level = 1.0f - sensitivity + sensitivity * v->velocity;
+    v->amp_base = 1.0f - sensitivity + sensitivity * v->velocity;
+    voice_apply_tremolo(s, v);
+}
+
+static void voice_apply_lfo(synth_t *s, synth_voice_t *v)
+{
+    v->lfo.shape = (synth_lfo_shape_t)synth_param_denorm(SYNTH_PARAM_LFO_SHAPE,
+                                                         s->params[SYNTH_PARAM_LFO_SHAPE]);
+    synth_lfo_set_rate(&v->lfo,
+                       synth_param_denorm(SYNTH_PARAM_LFO_RATE, s->params[SYNTH_PARAM_LFO_RATE]),
+                       SYNTH_MOD_INTERVAL);
+}
+
+/* Pitch is the oscillator's note, the bend in force and the LFO together, so
+   every one of the three moves it without the others noticing. */
+static void voice_tune_osc(synth_t *s, synth_voice_t *v)
+{
+    float depth = synth_param_denorm(SYNTH_PARAM_LFO_TO_PITCH, s->params[SYNTH_PARAM_LFO_TO_PITCH]);
+
+    synth_osc_set_freq(&v->osc,
+                       synth_note_to_hz((float)v->note + s->pitch_bend + depth * v->lfo_value));
 }
 
 /* The filter's cutoff is set in octaves so the envelope and the keyboard move it
@@ -131,7 +166,9 @@ static void voice_tune_filter(synth_t *s, synth_voice_t *v, float env_level)
     float amount = synth_param_denorm(SYNTH_PARAM_FILTER_ENV_AMOUNT, s->params[SYNTH_PARAM_FILTER_ENV_AMOUNT]);
     float track = synth_param_denorm(SYNTH_PARAM_FILTER_KEY_TRACK, s->params[SYNTH_PARAM_FILTER_KEY_TRACK]);
     float q = synth_param_denorm(SYNTH_PARAM_FILTER_Q, s->params[SYNTH_PARAM_FILTER_Q]);
-    float octaves = amount * env_level + track * ((float)v->note - 60.0f) * (1.0f / 12.0f);
+    float wobble = synth_param_denorm(SYNTH_PARAM_LFO_TO_CUTOFF, s->params[SYNTH_PARAM_LFO_TO_CUTOFF]);
+    float octaves = amount * env_level + track * ((float)v->note - 60.0f) * (1.0f / 12.0f)
+                    + wobble * v->lfo_value;
 
     synth_filter_set(&v->filter, base * synth_exp2f(octaves), q);
 }
@@ -169,15 +206,22 @@ void synth_init(synth_t *s, float sample_rate)
         synth_voice_t *v = &s->voices[i];
 
         synth_osc_init(&v->osc, s->sample_rate);
+        /* Distinct per voice so unison notes do not share one noise stream, and
+           derived from the index so two runs of the same patch still match. */
+        synth_osc_set_noise_seed(&v->osc, 0x9E3779B9u + (unsigned)i * 0x85EBCA6Bu);
         synth_env_init(&v->amp_env, s->sample_rate);
         synth_env_init(&v->filter_env, s->sample_rate);
         synth_filter_init(&v->filter, s->sample_rate);
         synth_amp_init(&v->amp);
+        synth_lfo_init(&v->lfo, s->sample_rate, 0xC2B2AE35u + (unsigned)i * 0x27D4EB2Fu);
+        v->lfo_value = 0.0f;
+        v->amp_base = 0.0f;
         v->note = 60;
         v->held = 0;
         v->velocity = 0.0f;
         v->age = 0;
         voice_apply_osc(s, v);
+        voice_apply_lfo(s, v);
         voice_apply_amp(s, v);
         voice_apply_envelope(s, v);
         voice_apply_filter(s, v);
@@ -224,6 +268,8 @@ void synth_set_sample_rate(synth_t *s, float sample_rate)
         v->filter_env.sample_rate = sample_rate;
         v->filter.sample_rate = sample_rate;
         v->osc.sample_rate = sample_rate;
+        v->lfo.sample_rate = sample_rate;
+        voice_apply_lfo(s, v);    /* the LFO's rate is in hertz, so it is too */
         voice_apply_filter(s, v); /* filter coefficients are rate dependent */
         voice_apply_osc(s, v);    /* so is the VOSIM pulse layout */
         voice_apply_amp(s, v);
@@ -243,7 +289,7 @@ void synth_set_pitch_bend(synth_t *s, float semitones)
         /* Voices in their release are still sounding and still belong to the
            note that was played, so they bend too. */
         if (synth_env_is_active(&v->amp_env)) {
-            synth_osc_set_freq(&v->osc, synth_note_to_hz((float)v->note + semitones));
+            voice_tune_osc(s, v);
         }
     }
 }
@@ -280,10 +326,13 @@ void synth_note_on(synth_t *s, int note, float velocity)
     v->age = ++s->age_counter;
 
     synth_osc_reset(&v->osc);
-    synth_osc_set_freq(&v->osc, synth_note_to_hz((float)note + s->pitch_bend));
+    synth_lfo_retrigger(&v->lfo);
+    v->lfo_value = 0.0f;
     synth_filter_reset(&v->filter); /* a stolen voice must not ring on into the new note */
     voice_apply_osc(s, v);
+    voice_apply_lfo(s, v);
     voice_apply_amp(s, v);
+    voice_tune_osc(s, v);
     voice_apply_envelope(s, v);
     synth_env_gate_on(&v->amp_env);
     synth_env_gate_on(&v->filter_env);
@@ -341,6 +390,7 @@ void synth_set_param(synth_t *s, synth_param_t param, float norm)
     /* Edits reach sounding voices, as they did in the JSyn prototype. */
     for (i = 0; i < SYNTH_MAX_VOICES; ++i) {
         voice_apply_osc(s, &s->voices[i]);
+        voice_apply_lfo(s, &s->voices[i]);
         voice_apply_amp(s, &s->voices[i]);
         voice_apply_envelope(s, &s->voices[i]);
         voice_apply_filter(s, &s->voices[i]);
@@ -357,6 +407,9 @@ static void render_block(synth_t *s, float *out, int n_frames)
     const float gain = synth_param_denorm(SYNTH_PARAM_MASTER_GAIN, s->params[SYNTH_PARAM_MASTER_GAIN]);
     const synth_filter_mode_t mode =
         (synth_filter_mode_t)synth_param_denorm(SYNTH_PARAM_FILTER_MODE, s->params[SYNTH_PARAM_FILTER_MODE]);
+    const float pitch_depth =
+        synth_param_denorm(SYNTH_PARAM_LFO_TO_PITCH, s->params[SYNTH_PARAM_LFO_TO_PITCH]);
+    const int bends_pitch = (pitch_depth > 0.001f || pitch_depth < -0.001f);
     int i, v;
 
     for (i = 0; i < n_frames; ++i) {
@@ -379,7 +432,14 @@ static void render_block(synth_t *s, float *out, int n_frames)
                that happens at control rate. */
             level = synth_env_next(&voice->filter_env);
             if (retune) {
+                voice->lfo_value = synth_lfo_next(&voice->lfo);
                 voice_tune_filter(s, voice, level);
+                voice_apply_tremolo(s, voice);
+                /* Retuning the oscillator recomputes the VOSIM pulse layout, so
+                   it is worth skipping when nothing asks for vibrato. */
+                if (bends_pitch) {
+                    voice_tune_osc(s, voice);
+                }
             }
 
             sample = synth_osc_next(&voice->osc);
@@ -483,6 +543,34 @@ static void apply_event(synth_t *s, const synth_event_t *event)
         break;
     default:
         break;
+    }
+}
+
+void synth_save_patch(const synth_t *s, float patch[SYNTH_PARAM_COUNT])
+{
+    int i;
+
+    for (i = 0; i < SYNTH_PARAM_COUNT; ++i) {
+        patch[i] = s->params[i];
+    }
+}
+
+void synth_load_patch(synth_t *s, const float patch[SYNTH_PARAM_COUNT])
+{
+    int i;
+
+    for (i = 0; i < SYNTH_PARAM_COUNT; ++i) {
+        s->params[i] = clamp01(patch[i]);
+    }
+
+    /* One pass over the voices rather than one per parameter, which is what
+       calling synth_set_param in a loop would cost. */
+    for (i = 0; i < SYNTH_MAX_VOICES; ++i) {
+        voice_apply_osc(s, &s->voices[i]);
+        voice_apply_lfo(s, &s->voices[i]);
+        voice_apply_amp(s, &s->voices[i]);
+        voice_apply_envelope(s, &s->voices[i]);
+        voice_apply_filter(s, &s->voices[i]);
     }
 }
 

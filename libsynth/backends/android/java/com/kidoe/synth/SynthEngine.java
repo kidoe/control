@@ -47,7 +47,8 @@ public final class SynthEngine {
     public static final int WAVE_PD = 3;
     public static final int WAVE_VOSIM = 4;
     public static final int WAVE_TERRAIN = 5;
-    public static final int WAVE_COUNT = 6;
+    public static final int WAVE_NOISE = 6;
+    public static final int WAVE_COUNT = 7;
 
     private SynthEngine() {
     }
