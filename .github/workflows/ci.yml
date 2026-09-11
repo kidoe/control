@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.compiler }}, ${{ matrix.voices }} voices
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        # Polyphony is a compile-time constant, so each build is a different
+        # program and each one has to be tested.
+        voices: [4, 8, 32]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -S libsynth -B build
+          -DCMAKE_C_COMPILER=${{ matrix.compiler }}
+          -DCMAKE_BUILD_TYPE=Release
+          -DSYNTH_MAX_VOICES=${{ matrix.voices }}
+          -DCMAKE_C_FLAGS=-Werror
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure
+
+  portability:
+    name: portability guarantees
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the core alone
+        # -fno-stack-protector keeps the check about what the source calls
+        # rather than what the distribution's default flags inject.
+        run: >
+          cmake -S libsynth -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DSYNTH_BUILD_TESTS=OFF
+          -DSYNTH_BUILD_EXAMPLES=OFF
+          -DCMAKE_C_FLAGS=-fno-stack-protector
+          && cmake --build build
+
+      - name: The core must link against nothing
+        run: sh libsynth/tools/check-no-external-deps.sh build/libsynth.a
+
+      - name: Headers must be usable from C++
+        run: |
+          cat > /tmp/cpp_check.cpp <<'EOF'
+          #include "synth/synth.h"
+          int main() {
+              synth_t s;
+              float block[64];
+              synth_init(&s, 48000.0f);
+              synth_note_on(&s, 60, 1.0f);
+              synth_render(&s, block, 64);
+              return 0;
+          }
+          EOF
+          g++ -std=c++17 -Wall -Wextra -Werror -Ilibsynth/include \
+              /tmp/cpp_check.cpp build/libsynth.a -o /tmp/cpp_check
+          /tmp/cpp_check
+
+      - name: Builds with parameter names compiled out
+        # The flash-saving path for small targets, easy to break unnoticed.
+        run: |
+          cmake -S libsynth -B build-noname \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS="-DSYNTH_PARAM_NAMES=0 -Werror"
+          cmake --build build-noname
+          cd build-noname && ctest --output-on-failure
