@@ -3,7 +3,7 @@
 A polyphonic synthesis core in C11 that runs from the same source on a desktop,
 on a microcontroller, and on Android.
 
-It is small — 8.3 KB of code and 4.7 KB of RAM at eight voices on a Cortex-M4F —
+It is small — 8.9 KB of code and 4.7 KB of RAM at eight voices on a Cortex-M4F —
 because it has no dependencies at all. No libm, no malloc, no threads, no OS. Pitch, curves, sine,
 tangent and exponentials are arithmetic; the caller owns the memory; the audio
 callback calls one function.
@@ -57,6 +57,11 @@ and the order the units are wired in `synth_render()`.
   at a time does not drag the notes already in it.
 - **Amplifier** — per-note level, velocity sensitivity, and a soft saturation
   that is exactly the identity when the drive is zero.
+
+A delay line lives outside the engine, in `src/delay.c`, with its buffer owned
+by the caller: a groovebox puts one echo on a track or one on the whole mix, and
+which of those it wants is not the library's decision. Nothing in the core
+refers to it, so a target that does not want an echo never links it.
 
 Every modulation depth is bipolar and neutral at its centre, and the engine does
 not compute one that reaches nothing: a patch that has not asked for an
@@ -141,7 +146,7 @@ program; CI tests 4, 8 and 32.
 The point of this library is portability, so the claims about it are measured
 rather than asserted, and the ones that are not are labelled.
 
-- **Verified here**: the core and its 106 tests, under gcc and clang with
+- **Verified here**: the core and its 114 tests, under gcc and clang with
   `-Wconversion -Werror`, at three voice counts, with the headers compiled as
   C++ and with parameter names stripped. Spectra are measured with a Goertzel
   probe at exact frequencies rather than asserted on the shape of the code, and
@@ -170,7 +175,8 @@ rather than asserted, and the ones that are not are labelled.
 ```
 libsynth/
   include/synth/   config.h, dsp.h, synth.h, midi.h — the public surface
-  src/             dsp.c (units), synth.c (engine), midi.c (parser)
+  src/             dsp.c (units), synth.c (engine), midi.c and delay.c, each
+                   its own translation unit so a target can leave it out
   tests/           one host suite, no audio hardware needed
   backends/        pc, android, embedded
   examples/        render_wav, and the demo sequencer both players share

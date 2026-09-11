@@ -170,6 +170,34 @@ void  synth_amp_init(synth_amp_t *amp);
 float synth_amp_shape(float x, float drive);
 float synth_amp_next(const synth_amp_t *amp, float in, float env_level);
 
+/*
+ * A delay line, and the first unit here that needs more memory than its own
+ * struct. The buffer belongs to the caller, like the synth_t does and for the
+ * same reason: an MCU declares `static float line[24000];` and nothing in this
+ * library ever allocates. Its length is the longest delay available.
+ *
+ * It is deliberately not part of synth_t. A groovebox wants one echo on a
+ * track, or one on the whole mix, and that is the host's arrangement to make;
+ * putting it in the engine would fix the answer and make a patch carry a
+ * buffer size. The host sums its parts and runs this over the result.
+ */
+typedef struct {
+    float *buffer;
+    int len;
+    int write;
+    float sample_rate;
+    float offset;    /* where the read point is, in frames behind the write */
+    float target;    /* where it is heading, after a time change */
+    float step;      /* frames it moves per frame, signed; zero when arrived */
+    float feedback;
+    float mix;       /* 0 is exactly the dry signal */
+} synth_delay_t;
+
+void  synth_delay_init(synth_delay_t *d, float *buffer, int frames, float sample_rate);
+void  synth_delay_set(synth_delay_t *d, float seconds, float feedback, float mix);
+void  synth_delay_clear(synth_delay_t *d); /* silences the line, keeps the settings */
+float synth_delay_next(synth_delay_t *d, float in);
+
 void  synth_filter_init(synth_filter_t *filter, float sample_rate);
 void  synth_filter_set(synth_filter_t *filter, float cutoff_hz, float q);
 void  synth_filter_reset(synth_filter_t *filter); /* clears state, keeps tuning */

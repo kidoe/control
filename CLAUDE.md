@@ -100,8 +100,8 @@ away for convenience.
 
 A groovebox wants a patch and a voice pool per track. That is several `synth_t`,
 not a channel argument: the engine has no mutable global state at all — the only
-global is the const parameter table, and all three translation units have an
-empty `.bss` — so instances are independent by construction. Each carries its
+global is the const parameter table, and every translation unit has an empty
+`.bss` — so instances are independent by construction. Each carries its
 own parameters, voices and event queue, and the host sums their outputs.
 
 Counted with callgrind, at 48 kHz in 96-frame blocks, for one second of audio:
@@ -185,6 +185,24 @@ order the units are actually wired in `synth_render()`.
   `x(1+d)/(1+d|x|)`, which is the identity at `d = 0` and provably keeps
   `|x| <= 1` mapped to `|y| <= 1`.
 
+A delay line sits outside all of this, in `src/delay.c`, for the same reason
+the MIDI parser does: nothing in the core refers to it, so a target that does
+not want an echo never links it, and it costs about 550 bytes of flash when it
+does. It is deliberately not part of `synth_t`. A groovebox wants one echo on a
+track or one on the whole mix, and that is the host's arrangement to make;
+putting it in the engine would fix the answer and make a patch carry a buffer
+size. The buffer is the caller's, like the `synth_t` is and for the same reason.
+
+Feedback is the one place in the library where a bounded input would not give a
+bounded signal — with feedback `f` the line settles at `1/(1-f)`, which is 20 at
+the most the control allows — so what goes into the line is clamped to full
+scale. The line is then bounded by 1 and the output is a crossfade between two
+things bounded by 1, so the headroom rule survives: an instance with an echo on
+it is bounded by 1 like any other. The clamp is only reachable by a patch that
+has asked the echo to run away. A time change slides the read point over 50 ms
+rather than jumping it, and the line is read between samples, because a moving
+read point that snapped to whole samples is zipper noise.
+
 Waveforms that are not symmetric about zero (phase distortion, VOSIM, terrain)
 have their mean removed when the controls move, so none of them emits DC.
 
@@ -205,7 +223,7 @@ cmake --build build
 cd build && ctest --output-on-failure
 ```
 
-106 test functions, 267 assertions, no audio hardware needed. Spectra are
+114 test functions, 283 assertions, no audio hardware needed. Spectra are
 measured with a Goertzel probe at exact frequencies rather than asserted on the
 shape of the code, so the tests survive refactoring and catch real regressions.
 
@@ -231,8 +249,9 @@ Be honest about this line; a lot of it cannot be checked from a container.
 - **Cross-compiles and fits, but has never run**: bare metal ARM. CI builds the
   library and `backends/embedded/rp2040_example.c` for Cortex-M0+ and
   Cortex-M4F with `-Wconversion -Werror` and runs the dependency check on both.
-  Measured at 8 voices: 9.1 KB of flash and 4.7 KB of RAM on M0+, 8.3 KB and
-  4.7 KB on M4F — on an RP2040 that is 0.4% of its flash and 1.7% of its SRAM,
+  Measured at 8 voices: 9.7 KB of flash and 4.7 KB of RAM on M0+, 8.9 KB and
+  4.7 KB on M4F, of which the delay line is 0.6 KB and 0.5 KB that a target
+  which does not link `src/delay.c` never pays — on an RP2040 that is 0.4% of its flash and 1.7% of its SRAM,
   so memory is not the constraint.
 
   CPU is the constraint, and it is now measured rather than guessed.

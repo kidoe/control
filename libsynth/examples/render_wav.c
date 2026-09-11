@@ -52,7 +52,7 @@ int main(int argc, char **argv)
     int clipped = 0;
     synth_t synth;
     synth_t drums;
-    demo_t demo;
+    static demo_t demo; /* 48 KB of echo line: static, the way an MCU would */
     float block[BLOCK];
     FILE *f = fopen(path, "wb");
 
