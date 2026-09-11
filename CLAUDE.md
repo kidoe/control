@@ -192,11 +192,38 @@ Be honest about this line; a lot of it cannot be checked from a container.
   4.6 KB on M4F — on an RP2040 that is 0.4% of its flash and 1.7% of its SRAM,
   so memory is not the constraint.
 
-  CPU is, and nothing here measures it. An M0+ has no FPU, so each of the
-  eleven `__aeabi_*` float routines the build pulls in costs tens of cycles
-  where an M4F spends one instruction and needs none of them. Until someone
-  renders on real silicon and times it, treat M4F-class hardware as the
-  supported target and the Pico as unproven.
+  CPU is the constraint, and it is now measured rather than guessed.
+  `tools/bench-arm/run.sh` renders a second of audio on QEMU's Cortex-M0 and
+  Cortex-M4F models and counts the instructions with a TCG plugin:
+
+  | instructions per second of audio | M4F | M0 |
+  |---|---|---|
+  | silent, 8 empty slots | 3.7 M | 9.4 M |
+  | sine, 1 voice | 14.5 M | 346 M |
+  | sine, 8 voices | 90.6 M | 2693 M |
+  | saw, 8 voices | 90.2 M | 2466 M |
+  | sine, 8 voices + pitch sweep | 124 M | 3773 M |
+
+  Read these as a floor. QEMU counts instructions retired, not cycles, and
+  models neither flash wait states nor the multi-cycle loads and taken branches
+  a real Cortex-M pays; silicon is worse than this, never better. The M4F
+  figures land within a per cent of what callgrind counts for the same C on
+  x86, which is the cross-check that they are counting the right thing.
+
+  What they say:
+
+  - **Soft float costs about 30x on the audio path.** Not the "tens of cycles
+    per call" a reader might assume from the symbol list — thirty times the
+    whole render loop.
+  - **M4F-class hardware is the supported target, and now with a number.**
+    90.6 M instructions a second for 8 voices is 54% of a 168 MHz STM32F405 at
+    one instruction per cycle. Since that is a floor, treat 8 voices as the
+    ceiling and 4 as comfortable.
+  - **The Pico cannot run this core, and no amount of tuning changes that.** A
+    single sine voice needs 346 M instructions per second of audio, which is
+    2.8 times a 125 MHz RP2040 core at one instruction per cycle. Overclocked
+    to 250 MHz it still does not fit one voice. Reaching an M0+ means a
+    fixed-point path, not a smaller voice count.
 
 ## Conventions
 
