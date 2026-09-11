@@ -505,6 +505,12 @@ uint64_t synth_frame_time(const synth_t *s)
     return ((uint64_t)high << 32) | (uint64_t)low;
 }
 
+void synth_set_frame_time(synth_t *s, uint64_t frame)
+{
+    s->frame_time = frame;
+    clock_publish(&s->clock, frame);
+}
+
 static const synth_event_t *queue_peek(synth_event_queue_t *q)
 {
     unsigned head = atomic_load_explicit(&q->head, memory_order_relaxed);

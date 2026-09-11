@@ -35,7 +35,8 @@ typedef struct {
     float phase;     /* [0, 1) */
     float phase_inc;
 
-    float pd_knee;   /* breakpoint of the phase warp; 0.5 reproduces a sine */
+    float pd_wanted; /* the knee the host asked for */
+    float pd_knee;   /* derived: that knee, widened if the pitch demands it */
     float pd_rise;   /* derived warp slopes, kept out of the sample loop */
     float pd_fall;
     float pd_scale;  /* derived: centres the warped wave and bounds it to 1 */

@@ -192,6 +192,13 @@ int synth_schedule(synth_t *s, const synth_event_t *event);
    audio stream the way a wall clock does. Safe to read from another thread. */
 uint64_t synth_frame_time(const synth_t *s);
 
+/* Moves this instance's clock onto a timeline already in progress. Each clock
+   starts at zero, so a part created mid-session would otherwise be numbering
+   frames its neighbours passed long ago and every event scheduled for it would
+   arrive late. Call it once, from the audio thread, before the new part renders
+   anything. */
+void synth_set_frame_time(synth_t *s, uint64_t frame);
+
 /* Bends every sounding voice, and every voice started afterwards, by this many
    semitones. Fractional and signed; 0 is no bend. */
 void synth_set_pitch_bend(synth_t *s, float semitones);

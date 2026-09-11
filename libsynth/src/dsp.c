@@ -154,6 +154,8 @@ static void vosim_update(synth_osc_t *osc)
     osc->vosim_dc = 0.5f * width * sum; /* sin^2 averages 0.5 across its pulse */
 }
 
+static void pd_update(synth_osc_t *osc);
+
 /* xorshift32: three shifts and three xors, no multiply, which matters on a core
    that has no multiplier worth the name. */
 static float noise_draw(synth_osc_t *osc)
@@ -184,6 +186,7 @@ void synth_osc_init(synth_osc_t *osc, float sample_rate)
     osc->vosim_decay = 0.6f;
     osc->vosim_pulses = 3;
     osc->wave = SYNTH_WAVE_SINE;
+    osc->pd_wanted = 0.5f;
     synth_osc_set_pd_knee(osc, 0.5f);
     synth_osc_set_terrain(osc, 0.7f, 1);
     synth_osc_set_noise_seed(osc, 0x9E3779B9u);
@@ -206,17 +209,29 @@ void synth_osc_set_freq(synth_osc_t *osc, float hz)
     }
     osc->phase_inc = inc;
     vosim_update(osc);
+    pd_update(osc); /* the usable knee depends on the pitch */
 }
 
-void synth_osc_set_pd_knee(synth_osc_t *osc, float knee)
+/* The warp squeezes a half cycle of sine into the fraction of the period before
+   the knee, so the fastest frequency it generates is roughly f0 / knee. Past
+   Nyquist that folds back as aliasing, and no correction at the corner can help:
+   at 1.5 kHz with a knee of 0.06 the fast segment covers half a sine in under
+   two samples, which is simply not representable. So the knee is widened as the
+   pitch rises. High notes lose some brightness, which is what a band-limited
+   instrument does; the alternative is that they gain a spray of inharmonic
+   tones, which is not. */
+static void pd_update(synth_osc_t *osc)
 {
+    float knee = osc->pd_wanted;
+    float floor_knee = 6.0f * osc->phase_inc;
     float dc;
     float scale;
 
-    if (knee < 0.02f) {
-        knee = 0.02f;
-    } else if (knee > 0.98f) {
-        knee = 0.98f;
+    if (floor_knee > 0.5f) {
+        floor_knee = 0.5f; /* never duller than the plain sine the knee starts as */
+    }
+    if (knee < floor_knee) {
+        knee = floor_knee;
     }
     osc->pd_knee = knee;
     osc->pd_rise = 0.5f / knee;
@@ -231,6 +246,17 @@ void synth_osc_set_pd_knee(synth_osc_t *osc, float knee)
     scale = 1.0f / (1.0f + ((dc < 0.0f) ? -dc : dc));
     osc->pd_scale = scale;
     osc->pd_offset = dc * scale;
+}
+
+void synth_osc_set_pd_knee(synth_osc_t *osc, float knee)
+{
+    if (knee < 0.02f) {
+        knee = 0.02f;
+    } else if (knee > 0.98f) {
+        knee = 0.98f;
+    }
+    osc->pd_wanted = knee;
+    pd_update(osc);
 }
 
 void synth_osc_set_vosim(synth_osc_t *osc, float formant_hz, int pulses, float decay)

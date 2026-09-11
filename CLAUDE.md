@@ -90,7 +90,8 @@ Two things the host owns:
   unison reach four. Nothing in the library can pick that budget.
 - **The clock.** `synth_frame_time()` is per instance and starts at zero, so a
   part created mid-session does not share the frame numbers the others are
-  already using. Create every part up front, or the sequencer has to offset.
+  already using. Either create every part up front, or call
+  `synth_set_frame_time()` once to put the new one on the running timeline.
 
 ## Signal path
 
@@ -121,6 +122,15 @@ order the units are actually wired in `synth_render()`.
 Waveforms that are not symmetric about zero (phase distortion, VOSIM, terrain)
 have their mean removed when the controls move, so none of them emits DC.
 
+Aliasing is measured rather than assumed, by looking for energy below the
+fundamental where a band-limited periodic waveform has none. Every waveform sits
+at the probe's own floor. Phase distortion did not: its knee squeezes a half
+cycle of sine into that fraction of the period, so at a tight knee and a high
+note the fast segment crossed half a sine in under two samples. No correction at
+the corner can represent that, so the knee is widened with pitch instead — six
+times the phase increment, which is where the measurement reaches the floor.
+High notes lose brightness rather than gaining inharmonic tones.
+
 ## Building and testing
 
 ```sh
@@ -129,7 +139,7 @@ cmake --build build
 cd build && ctest --output-on-failure
 ```
 
-86 test functions, 219 assertions, no audio hardware needed. Spectra are
+90 test functions, 230 assertions, no audio hardware needed. Spectra are
 measured with a Goertzel probe at exact frequencies rather than asserted on the
 shape of the code, so the tests survive refactoring and catch real regressions.
 
