@@ -4,6 +4,21 @@
 #include "synth/config.h"
 #include "synth/dsp.h"
 
+#include <stdint.h>
+
+/* The event queue's indices are read and written by two threads, so they have
+   to be real atomics. C and C++ spell that differently and this header has to
+   compile as both. */
+#ifdef __cplusplus
+#include <atomic>
+#define SYNTH_ATOMIC_UINT std::atomic<unsigned>
+#define SYNTH_ATOMIC_U64 std::atomic<uint64_t>
+#else
+#include <stdatomic.h>
+#define SYNTH_ATOMIC_UINT _Atomic unsigned
+#define SYNTH_ATOMIC_U64 _Atomic uint64_t
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -78,6 +93,31 @@ typedef struct {
     unsigned age;      /* allocation order, drives voice stealing */
 } synth_voice_t;
 
+typedef enum {
+    SYNTH_EVENT_NOTE_ON = 0,
+    SYNTH_EVENT_NOTE_OFF,
+    SYNTH_EVENT_PARAM,
+    SYNTH_EVENT_PITCH_BEND,
+    SYNTH_EVENT_ALL_NOTES_OFF
+} synth_event_type_t;
+
+typedef struct {
+    uint64_t frame;          /* absolute, on the synth_frame_time() clock */
+    synth_event_type_t type;
+    int index;               /* MIDI note, or synth_param_t */
+    float value;             /* velocity or normalized parameter, [0, 1];
+                                semitones for a pitch bend */
+} synth_event_t;
+
+/* Single producer, single consumer. The producer only ever advances tail, the
+   consumer only ever advances head, so neither needs a read-modify-write and
+   the queue works on targets with no atomic RMW at all. */
+typedef struct {
+    synth_event_t events[SYNTH_EVENT_QUEUE_LEN];
+    SYNTH_ATOMIC_UINT head;
+    SYNTH_ATOMIC_UINT tail;
+} synth_event_queue_t;
+
 /* Fields are private. They live in the header only so the caller can place the
    instance in static storage on targets without a heap. */
 typedef struct {
@@ -87,6 +127,8 @@ typedef struct {
     unsigned age_counter;
     int mod_counter;    /* paces filter retuning, see SYNTH_MOD_INTERVAL */
     float pitch_bend;   /* semitones, applied on top of every note */
+    synth_event_queue_t queue;
+    SYNTH_ATOMIC_U64 frame_time;
 } synth_t;
 
 /* Lifecycle */
@@ -97,8 +139,36 @@ void synth_reset(synth_t *s); /* silences every voice, keeps parameters */
    device is open. Silences every voice; parameters are kept. */
 void synth_set_sample_rate(synth_t *s, float sample_rate);
 
-/* Audio. Writes n_frames of mono samples, overwriting `out`. Real-time safe. */
+/* Audio. Writes n_frames of mono samples, overwriting `out`. Real-time safe.
+   Also drains every event that falls due inside the block, splitting the render
+   at their frame offsets so a step lands on its own frame rather than on the
+   buffer boundary. */
 void synth_render(synth_t *s, float *out, int n_frames);
+
+/*
+ * Scheduling.
+ *
+ * synth_schedule() is the one function that may be called from a thread other
+ * than the audio one, and the only safe way to drive the engine from a UI or
+ * sequencer thread: everything else in this header assumes the caller is the
+ * audio thread. It never blocks and never allocates; it returns 0 when the
+ * queue is full, which is a signal to schedule less far ahead or to raise
+ * SYNTH_EVENT_QUEUE_LEN.
+ *
+ * Events are applied in the order they were scheduled. An event whose frame has
+ * already passed is applied at the start of the next block rather than dropped:
+ * a step that is late recovers, a step that is silent does not.
+ *
+ * One queue belongs to one synth_t. A host wanting several independent parts,
+ * each with its own patch and voices, uses several synth_t and schedules into
+ * whichever one owns the part.
+ */
+int synth_schedule(synth_t *s, const synth_event_t *event);
+
+/* Frames rendered since synth_init(). The clock a host's sequencer plans
+   against; it advances only inside synth_render(), so it never drifts from the
+   audio stream the way a wall clock does. Safe to read from another thread. */
+uint64_t synth_frame_time(const synth_t *s);
 
 /* Bends every sounding voice, and every voice started afterwards, by this many
    semitones. Fractional and signed; 0 is no bend. */

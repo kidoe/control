@@ -16,6 +16,13 @@
 #define SYNTH_MOD_INTERVAL 4
 #endif
 
+/* Events a host can have in flight at once. Must be a power of two. Sizing is a
+   lookahead budget: a sequencer scheduling one block ahead needs a handful, one
+   scheduling a whole bar ahead needs steps * tracks. Costs 24 bytes each. */
+#ifndef SYNTH_EVENT_QUEUE_LEN
+#define SYNTH_EVENT_QUEUE_LEN 64
+#endif
+
 /* Set to 0 to drop parameter name strings from the binary (saves flash). */
 #ifndef SYNTH_PARAM_NAMES
 #define SYNTH_PARAM_NAMES 1
