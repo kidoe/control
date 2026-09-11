@@ -80,4 +80,6 @@ report "silent, 8 empty slots"   -DBENCH_VOICES=0
 report "sine, 1 voice"           -DBENCH_VOICES=1
 report "sine, 8 voices"          -DBENCH_VOICES=8
 report "saw, 8 voices"           -DBENCH_VOICES=8 -DBENCH_WAVE=SYNTH_WAVE_SAW
+report "sine, 8 + filter LFO"    -DBENCH_VOICES=8 -DBENCH_LFO_CUTOFF=1
+report "sine, 8 + vibrato"       -DBENCH_VOICES=8 -DBENCH_LFO_PITCH=1
 report "sine, 8 + pitch sweep"   -DBENCH_VOICES=8 -DBENCH_SWEEP=1

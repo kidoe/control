@@ -65,8 +65,8 @@ refers to it, so a target that does not want an echo never links it.
 
 Every modulation depth is bipolar and neutral at its centre, and the engine does
 not compute one that reaches nothing: a patch that has not asked for an
-envelope, an LFO or a sweep does not pay for it, which is 43% of the render loop
-on a Cortex-M4F.
+envelope, an LFO or a sweep does not pay for it, which is 47% of the render
+loop.
 
 Everything is driven through parameters normalized to `[0, 1]`, with range,
 curve and name in a descriptor table, so a MIDI CC, an ADC reading and a UI
@@ -101,7 +101,9 @@ There is no channel argument, because there is no mutable global state: every
 translation unit has an empty `.bss`, and the only global is the const parameter
 table. A groovebox gives each track its own `synth_t` — its own patch, voices
 and event queue — and sums the outputs. Cost follows sounding voices rather than
-instances; eight idle parts cost 0.12% of a desktop core.
+instances: eight notes cost the same whether they sit in one instance or in
+eight, and an instance that is sounding nothing costs 4.3 M instructions a
+second for scanning its empty voice slots.
 
 The host owns two things the library cannot pick: the headroom (each instance is
 bounded by 1 on its own, so four in unison reach four) and the clock (each
