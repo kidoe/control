@@ -40,7 +40,7 @@ away for convenience.
   Cortex-M0+ cannot do at all.
 - **No allocation and no OS calls, ever.** The caller owns the `synth_t`, which
   is why its fields sit in the header: an MCU declares `static synth_t s;`.
-  4256 bytes at 8 voices on ARM32, of which 1544 is the event queue.
+  4640 bytes at 8 voices on ARM32, of which 1544 is the event queue.
 - **`synth_render()` is the only function for the audio callback**, and it is
   real-time safe. It also drains scheduled events, splitting the block at their
   frame offsets so a sequencer step lands on its own frame.
@@ -70,11 +70,11 @@ away for convenience.
   | one 96-frame block | instructions | of the budget |
   |---|---|---|
   | nothing sounding | 7,062 | 2.1% |
-  | 8 voices, no events | 119,052 | 35.4% |
-  | 8 voices, one parameter change | 120,786 | 35.9% |
-  | 8 voices, 16 parameter changes | 146,461 | 43.6% |
-  | 8 voices, 8 notes starting | 132,809 | 39.5% |
-  | 8 voices, 16 notes starting | 148,216 | 44.1% |
+  | 8 voices, no events | 104,928 | 31.2% |
+  | 8 voices, one parameter change | 106,666 | 31.7% |
+  | 8 voices, 16 parameter changes | 132,342 | 39.4% |
+  | 8 voices, 8 notes starting | 119,306 | 35.5% |
+  | 8 voices, 16 notes starting | 135,510 | 40.3% |
 
   The map from a parameter to the units it reaches is a switch with no default,
   so `-Wswitch` refuses a parameter nobody has placed in it, and a test checks
@@ -100,8 +100,8 @@ away for convenience.
 
 A groovebox wants a patch and a voice pool per track. That is several `synth_t`,
 not a channel argument: the engine has no mutable global state at all — the only
-global is the const parameter table, and all three translation units have an
-empty `.bss` — so instances are independent by construction. Each carries its
+global is the const parameter table, and every translation unit has an empty
+`.bss` — so instances are independent by construction. Each carries its
 own parameters, voices and event queue, and the host sums their outputs.
 
 Counted with callgrind, at 48 kHz in 96-frame blocks, for one second of audio:
@@ -185,6 +185,24 @@ order the units are actually wired in `synth_render()`.
   `x(1+d)/(1+d|x|)`, which is the identity at `d = 0` and provably keeps
   `|x| <= 1` mapped to `|y| <= 1`.
 
+A delay line sits outside all of this, in `src/delay.c`, for the same reason
+the MIDI parser does: nothing in the core refers to it, so a target that does
+not want an echo never links it, and it costs about 550 bytes of flash when it
+does. It is deliberately not part of `synth_t`. A groovebox wants one echo on a
+track or one on the whole mix, and that is the host's arrangement to make;
+putting it in the engine would fix the answer and make a patch carry a buffer
+size. The buffer is the caller's, like the `synth_t` is and for the same reason.
+
+Feedback is the one place in the library where a bounded input would not give a
+bounded signal — with feedback `f` the line settles at `1/(1-f)`, which is 20 at
+the most the control allows — so what goes into the line is clamped to full
+scale. The line is then bounded by 1 and the output is a crossfade between two
+things bounded by 1, so the headroom rule survives: an instance with an echo on
+it is bounded by 1 like any other. The clamp is only reachable by a patch that
+has asked the echo to run away. A time change slides the read point over 50 ms
+rather than jumping it, and the line is read between samples, because a moving
+read point that snapped to whole samples is zipper noise.
+
 Waveforms that are not symmetric about zero (phase distortion, VOSIM, terrain)
 have their mean removed when the controls move, so none of them emits DC.
 
@@ -205,7 +223,7 @@ cmake --build build
 cd build && ctest --output-on-failure
 ```
 
-106 test functions, 267 assertions, no audio hardware needed. Spectra are
+116 test functions, 287 assertions, no audio hardware needed. Spectra are
 measured with a Goertzel probe at exact frequencies rather than asserted on the
 shape of the code, so the tests survive refactoring and catch real regressions.
 
@@ -231,8 +249,9 @@ Be honest about this line; a lot of it cannot be checked from a container.
 - **Cross-compiles and fits, but has never run**: bare metal ARM. CI builds the
   library and `backends/embedded/rp2040_example.c` for Cortex-M0+ and
   Cortex-M4F with `-Wconversion -Werror` and runs the dependency check on both.
-  Measured at 8 voices: 9.1 KB of flash and 4.7 KB of RAM on M0+, 8.3 KB and
-  4.7 KB on M4F — on an RP2040 that is 0.4% of its flash and 1.7% of its SRAM,
+  Measured at 8 voices: 9.8 KB of flash and 5.0 KB of RAM on M0+, 9.0 KB and
+  5.0 KB on M4F, of which the delay line is 0.6 KB and 0.5 KB that a target
+  which does not link `src/delay.c` never pays — on an RP2040 that is 0.4% of its flash and 1.7% of its SRAM,
   so memory is not the constraint.
 
   CPU is the constraint, and it is now measured rather than guessed.
@@ -241,11 +260,11 @@ Be honest about this line; a lot of it cannot be checked from a container.
 
   | instructions per second of audio | M4F | M0 |
   |---|---|---|
-  | silent, 8 empty slots | 3.8 M | 11.2 M |
-  | sine, 1 voice | 9.9 M | 210 M |
-  | sine, 8 voices | 52.7 M | 1598 M |
-  | saw, 8 voices | 52.3 M | 1371 M |
-  | sine, 8 voices + pitch sweep | 81.0 M | 2614 M |
+  | silent, 8 empty slots | 3.8 M | 13.3 M |
+  | sine, 1 voice | 9.3 M | 153 M |
+  | sine, 8 voices | 47.6 M | 1122 M |
+  | saw, 8 voices | 47.2 M | 896 M |
+  | sine, 8 voices + pitch sweep | 74.2 M | 1847 M |
 
   Read these as a floor. QEMU counts instructions retired, not cycles, and
   models neither flash wait states nor the multi-cycle loads and taken branches
@@ -255,20 +274,36 @@ Be honest about this line; a lot of it cannot be checked from a container.
 
   What they say:
 
-  - **Soft float costs about 30x on the audio path.** Not the "tens of cycles
-    per call" a reader might assume from the symbol list — thirty times the
-    whole render loop.
+  - **Soft float costs about 24x on the audio path.** Not the "tens of cycles
+    per call" a reader might assume from the symbol list — twenty-four times
+    the whole render loop.
   - **M4F-class hardware is the supported target, and now with a number.**
-    52.7 M instructions a second for 8 voices is 31% of a 168 MHz STM32F405 at
+    47.6 M instructions a second for 8 voices is 28% of a 168 MHz STM32F405 at
     one instruction per cycle. Since that is a floor, treat 8 voices as usable
     and leave room for whatever else the firmware does.
-  - **The Pico is still out of reach, but no longer by an order of magnitude.**
-    A single sine voice needs 210 M instructions per second of audio, 1.7 times
-    a 125 MHz RP2040 core at one instruction per cycle, where before the
-    modulation skips it was 2.8 times. Overclocked to 250 MHz one voice is
-    within sight of fitting at one instruction per cycle — which real silicon
-    does not reach, so it still does not fit in practice. The float path is not
-    an RP2040 target; reaching one means fixed point.
+  - **The Pico is close but not there.** A single sine voice needs 153 M
+    instructions per second of audio, 1.2 times a 125 MHz RP2040 core at one
+    instruction per cycle — down from 2.8 times before any of this work.
+    Overclocked to 250 MHz one voice fits at 61% of a core at that rate, and
+    real silicon does not reach one instruction per cycle, so call it plausible
+    for one or two voices on an overclocked Pico and unproven until someone
+    renders on the real thing.
+
+  **On fixed point**, which is the standing question for the M0:
+  `tools/bench-arm/profile.sh` answers it, by attributing every instruction to
+  the function it ran in. Before this work 93.8% of every instruction on the M0 was
+  inside `__aeabi_*` float helpers, of which 20.8% was `__aeabi_fdiv` — and
+  division turned out to be removable *in float*, by keeping a rate beside each
+  envelope time and by saying that zero drive is the identity. That is done, and
+  it is where the 30% came from. What is left is 92% float helpers, now almost
+  entirely multiply (42%), add (22%) and subtract (18%). Those are irreducible
+  without changing the number format: only a fixed-point path removes them, and
+  it would have to replace essentially every arithmetic expression in `dsp.c`
+  and `synth.c`. The M4F column is the floor such a path aims at — the same
+  algorithm with arithmetic that costs one instruction — and it sits 24x below
+  where the M0 is. It is a rewrite, not an optimisation, and this repository has
+  no M0+ hardware to check it against; the measurement is here so the decision
+  can be made on numbers.
 
 ## Conventions
 

@@ -97,7 +97,7 @@ jobs:
                         "-mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16"; do
             echo "=== $target ==="
             rm -rf arm-build && mkdir arm-build
-            for unit in dsp synth midi; do
+            for unit in dsp synth midi delay; do
               arm-none-eabi-gcc $target -Os -std=c11 \
                 -Wall -Wextra -Wpedantic -Wconversion -Werror \
                 -Ilibsynth/include -c libsynth/src/$unit.c -o arm-build/$unit.o

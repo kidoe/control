@@ -465,16 +465,44 @@ float synth_lfo_next(synth_lfo_t *lfo)
     return out;
 }
 
+/* A time of zero means the stage is over in one sample, which is what a rate of
+   1 gives: the ramp's progress runs from 0 to 1 whatever it measures. */
+static float env_rate(float dt, float seconds)
+{
+    return (seconds > 0.0f) ? (dt / seconds) : 1.0f;
+}
+
+static void env_derive(synth_env_t *env)
+{
+    env->dt = (env->sample_rate > 0.0f) ? (1.0f / env->sample_rate) : 0.0f;
+    env->attack_rate = env_rate(env->dt, env->attack);
+    env->decay_rate = env_rate(env->dt, env->decay);
+    env->release_rate = env_rate(env->dt, env->release);
+}
+
+void synth_env_set_times(synth_env_t *env, float delay, float attack, float hold,
+                         float decay, float sustain, float release)
+{
+    env->delay = delay;
+    env->attack = attack;
+    env->hold = hold;
+    env->decay = decay;
+    env->sustain = sustain;
+    env->release = release;
+    env_derive(env);
+}
+
+void synth_env_set_sample_rate(synth_env_t *env, float sample_rate)
+{
+    env->sample_rate = sample_rate;
+    env_derive(env);
+}
+
 void synth_env_init(synth_env_t *env, float sample_rate)
 {
-    env->delay = 0.0f;
-    env->attack = 0.01f;
-    env->hold = 0.0f;
-    env->decay = 0.2f;
-    env->sustain = 0.5f;
-    env->release = 0.3f;
-
     env->sample_rate = sample_rate;
+    synth_env_set_times(env, 0.0f, 0.01f, 0.0f, 0.2f, 0.5f, 0.3f);
+
     env->level = 0.0f;
     env->time = 0.0f;
     env->release_from = 0.0f;
@@ -500,7 +528,6 @@ void synth_env_gate_off(synth_env_t *env)
 
 float synth_env_next(synth_env_t *env)
 {
-    const float dt = (env->sample_rate > 0.0f) ? 1.0f / env->sample_rate : 0.0f;
     float t;
 
     switch (env->stage) {
@@ -510,7 +537,7 @@ float synth_env_next(synth_env_t *env)
 
     case SYNTH_ENV_DELAY:
         env->level = 0.0f;
-        env->time += dt;
+        env->time += env->dt;
         if (env->time >= env->delay) {
             env->time = 0.0f;
             env->stage = SYNTH_ENV_ATTACK;
@@ -518,8 +545,8 @@ float synth_env_next(synth_env_t *env)
         break;
 
     case SYNTH_ENV_ATTACK:
-        env->time += dt;
-        env->level = (env->attack > 0.0f) ? env->time / env->attack : 1.0f;
+        env->time += env->attack_rate;
+        env->level = env->time;
         if (env->level >= 1.0f) {
             env->level = 1.0f;
             env->time = 0.0f;
@@ -529,7 +556,7 @@ float synth_env_next(synth_env_t *env)
 
     case SYNTH_ENV_HOLD:
         env->level = 1.0f;
-        env->time += dt;
+        env->time += env->dt;
         if (env->time >= env->hold) {
             env->time = 0.0f;
             env->stage = SYNTH_ENV_DECAY;
@@ -537,8 +564,8 @@ float synth_env_next(synth_env_t *env)
         break;
 
     case SYNTH_ENV_DECAY:
-        env->time += dt;
-        t = (env->decay > 0.0f) ? env->time / env->decay : 1.0f;
+        env->time += env->decay_rate;
+        t = env->time;
         if (t >= 1.0f) {
             t = 1.0f;
             env->time = 0.0f;
@@ -552,8 +579,8 @@ float synth_env_next(synth_env_t *env)
         break;
 
     case SYNTH_ENV_RELEASE:
-        env->time += dt;
-        t = (env->release > 0.0f) ? env->time / env->release : 1.0f;
+        env->time += env->release_rate;
+        t = env->time;
         if (t >= 1.0f) {
             env->level = 0.0f;
             env->time = 0.0f;
@@ -579,7 +606,16 @@ void synth_amp_init(synth_amp_t *amp)
    scale out however hard it is pushed, with no branch and no clamp. */
 float synth_amp_shape(float x, float drive)
 {
-    float magnitude = (x < 0.0f) ? -x : x;
+    float magnitude;
+
+    /* At zero drive the whole expression collapses to x. Saying so costs a
+       comparison and saves a divide, which on a core without an FPU is two
+       hundred instructions per sample per voice for the patches — most of
+       them — that never asked to be driven. */
+    if (drive <= 0.0f) {
+        return x;
+    }
+    magnitude = (x < 0.0f) ? -x : x;
 
     return x * (1.0f + drive) / (1.0f + drive * magnitude);
 }

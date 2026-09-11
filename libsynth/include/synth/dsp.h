@@ -113,7 +113,12 @@ typedef enum {
 } synth_env_stage_t;
 
 /* DAHDSR, matching the envelope shape of the JSyn prototype.
-   Times are in seconds, sustain is a level in [0, 1]. */
+   Times are in seconds, sustain is a level in [0, 1].
+
+   The times are set through synth_env_set_times() rather than written into the
+   struct, because each ramp also keeps how far it travels per sample. Dividing
+   by a time once per sample was 20% of every instruction this library executed
+   on a core without an FPU. */
 typedef struct {
     float delay;
     float attack;
@@ -123,13 +128,21 @@ typedef struct {
     float release;
 
     float sample_rate;
+    float dt;            /* derived: seconds per sample */
+    float attack_rate;   /* derived: the fraction of each ramp a sample covers */
+    float decay_rate;
+    float release_rate;
+
     float level;
-    float time;
+    float time;          /* seconds through delay and hold, a fraction elsewhere */
     float release_from;
     synth_env_stage_t stage;
 } synth_env_t;
 
 void  synth_env_init(synth_env_t *env, float sample_rate);
+void  synth_env_set_times(synth_env_t *env, float delay, float attack, float hold,
+                          float decay, float sustain, float release);
+void  synth_env_set_sample_rate(synth_env_t *env, float sample_rate);
 void  synth_env_gate_on(synth_env_t *env);
 void  synth_env_gate_off(synth_env_t *env);
 float synth_env_next(synth_env_t *env);
@@ -169,6 +182,34 @@ typedef struct {
 void  synth_amp_init(synth_amp_t *amp);
 float synth_amp_shape(float x, float drive);
 float synth_amp_next(const synth_amp_t *amp, float in, float env_level);
+
+/*
+ * A delay line, and the first unit here that needs more memory than its own
+ * struct. The buffer belongs to the caller, like the synth_t does and for the
+ * same reason: an MCU declares `static float line[24000];` and nothing in this
+ * library ever allocates. Its length is the longest delay available.
+ *
+ * It is deliberately not part of synth_t. A groovebox wants one echo on a
+ * track, or one on the whole mix, and that is the host's arrangement to make;
+ * putting it in the engine would fix the answer and make a patch carry a
+ * buffer size. The host sums its parts and runs this over the result.
+ */
+typedef struct {
+    float *buffer;
+    int len;
+    int write;
+    float sample_rate;
+    float offset;    /* where the read point is, in frames behind the write */
+    float target;    /* where it is heading, after a time change */
+    float step;      /* frames it moves per frame, signed; zero when arrived */
+    float feedback;
+    float mix;       /* 0 is exactly the dry signal */
+} synth_delay_t;
+
+void  synth_delay_init(synth_delay_t *d, float *buffer, int frames, float sample_rate);
+void  synth_delay_set(synth_delay_t *d, float seconds, float feedback, float mix);
+void  synth_delay_clear(synth_delay_t *d); /* silences the line, keeps the settings */
+float synth_delay_next(synth_delay_t *d, float in);
 
 void  synth_filter_init(synth_filter_t *filter, float sample_rate);
 void  synth_filter_set(synth_filter_t *filter, float cutoff_hz, float q);
