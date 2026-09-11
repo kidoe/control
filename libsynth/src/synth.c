@@ -149,6 +149,10 @@ void synth_init(synth_t *s, float sample_rate)
 
     s->sample_rate = (sample_rate > 0.0f) ? sample_rate : 44100.0f;
     s->age_counter = 0;
+    s->pitch_bend = 0.0f;
+    atomic_store_explicit(&s->queue.head, 0u, memory_order_relaxed);
+    atomic_store_explicit(&s->queue.tail, 0u, memory_order_relaxed);
+    atomic_store_explicit(&s->frame_time, 0u, memory_order_relaxed);
 
     for (i = 0; i < SYNTH_PARAM_COUNT; ++i) {
         s->params[i] = k_param_info[i].default_norm;
@@ -220,6 +224,23 @@ void synth_set_sample_rate(synth_t *s, float sample_rate)
     synth_reset(s);
 }
 
+void synth_set_pitch_bend(synth_t *s, float semitones)
+{
+    int i;
+
+    s->pitch_bend = semitones;
+
+    for (i = 0; i < SYNTH_MAX_VOICES; ++i) {
+        synth_voice_t *v = &s->voices[i];
+
+        /* Voices in their release are still sounding and still belong to the
+           note that was played, so they bend too. */
+        if (synth_env_is_active(&v->amp_env)) {
+            synth_osc_set_freq(&v->osc, synth_note_to_hz((float)v->note + semitones));
+        }
+    }
+}
+
 static synth_voice_t *allocate_voice(synth_t *s, int note)
 {
     synth_voice_t *oldest = &s->voices[0];
@@ -252,7 +273,7 @@ void synth_note_on(synth_t *s, int note, float velocity)
     v->age = ++s->age_counter;
 
     synth_osc_reset(&v->osc);
-    synth_osc_set_freq(&v->osc, synth_note_to_hz((float)note));
+    synth_osc_set_freq(&v->osc, synth_note_to_hz((float)note + s->pitch_bend));
     synth_filter_reset(&v->filter); /* a stolen voice must not ring on into the new note */
     voice_apply_osc(s, v);
     voice_apply_amp(s, v);
@@ -324,7 +345,7 @@ float synth_get_param(const synth_t *s, synth_param_t param)
     return param_is_valid(param) ? s->params[param] : 0.0f;
 }
 
-void synth_render(synth_t *s, float *out, int n_frames)
+static void render_block(synth_t *s, float *out, int n_frames)
 {
     const float gain = synth_param_denorm(SYNTH_PARAM_MASTER_GAIN, s->params[SYNTH_PARAM_MASTER_GAIN]);
     const synth_filter_mode_t mode =
@@ -361,4 +382,112 @@ void synth_render(synth_t *s, float *out, int n_frames)
 
         out[i] = sum * gain;
     }
+}
+
+/* Masking the index is only valid for a power of two, and a host is free to set
+   this, so it is checked rather than assumed. */
+typedef char synth_event_queue_len_must_be_a_power_of_two[
+    ((SYNTH_EVENT_QUEUE_LEN & (SYNTH_EVENT_QUEUE_LEN - 1)) == 0 &&
+     SYNTH_EVENT_QUEUE_LEN >= 2) ? 1 : -1];
+
+int synth_schedule(synth_t *s, const synth_event_t *event)
+{
+    synth_event_queue_t *q = &s->queue;
+    unsigned tail = atomic_load_explicit(&q->tail, memory_order_relaxed);
+    unsigned next = (tail + 1u) & (SYNTH_EVENT_QUEUE_LEN - 1u);
+
+    if (next == atomic_load_explicit(&q->head, memory_order_acquire)) {
+        return 0; /* full: refuse rather than block the caller or overwrite */
+    }
+
+    q->events[tail] = *event;
+    /* Release pairs with the consumer's acquire, so the event is visible before
+       the index that publishes it. */
+    atomic_store_explicit(&q->tail, next, memory_order_release);
+    return 1;
+}
+
+uint64_t synth_frame_time(const synth_t *s)
+{
+    return atomic_load_explicit(&s->frame_time, memory_order_relaxed);
+}
+
+static const synth_event_t *queue_peek(synth_event_queue_t *q)
+{
+    unsigned head = atomic_load_explicit(&q->head, memory_order_relaxed);
+
+    if (head == atomic_load_explicit(&q->tail, memory_order_acquire)) {
+        return 0;
+    }
+    return &q->events[head];
+}
+
+static void queue_pop(synth_event_queue_t *q)
+{
+    unsigned head = atomic_load_explicit(&q->head, memory_order_relaxed);
+
+    atomic_store_explicit(&q->head, (head + 1u) & (SYNTH_EVENT_QUEUE_LEN - 1u),
+                          memory_order_release);
+}
+
+static void apply_event(synth_t *s, const synth_event_t *event)
+{
+    switch (event->type) {
+    case SYNTH_EVENT_NOTE_ON:
+        synth_note_on(s, event->index, event->value);
+        break;
+    case SYNTH_EVENT_NOTE_OFF:
+        synth_note_off(s, event->index);
+        break;
+    case SYNTH_EVENT_PARAM:
+        synth_set_param(s, (synth_param_t)event->index, event->value);
+        break;
+    case SYNTH_EVENT_PITCH_BEND:
+        synth_set_pitch_bend(s, event->value);
+        break;
+    case SYNTH_EVENT_ALL_NOTES_OFF:
+        synth_all_notes_off(s);
+        break;
+    default:
+        break;
+    }
+}
+
+void synth_render(synth_t *s, float *out, int n_frames)
+{
+    uint64_t start = atomic_load_explicit(&s->frame_time, memory_order_relaxed);
+    int done = 0;
+
+    if (n_frames <= 0) {
+        return;
+    }
+
+    while (done < n_frames) {
+        int chunk = n_frames - done;
+        const synth_event_t *next;
+
+        /* Apply everything already due, then shorten the chunk so the next
+           event lands on its own frame instead of the block boundary. */
+        while ((next = queue_peek(&s->queue)) != 0) {
+            uint64_t now = start + (uint64_t)done;
+
+            if (next->frame <= now) {
+                synth_event_t due = *next;
+
+                queue_pop(&s->queue);
+                apply_event(s, &due);
+                continue;
+            }
+            if (next->frame - now < (uint64_t)chunk) {
+                chunk = (int)(next->frame - now);
+            }
+            break;
+        }
+
+        render_block(s, out + done, chunk);
+        done += chunk;
+    }
+
+    atomic_store_explicit(&s->frame_time, start + (uint64_t)n_frames,
+                          memory_order_relaxed);
 }

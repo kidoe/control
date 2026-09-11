@@ -12,20 +12,40 @@
 
 static synth_t g_synth;
 static AAudioStream *g_stream;
+static int g_channels = 1;
 
 static aaudio_data_callback_result_t audio_callback(AAudioStream *stream, void *user_data,
                                                     void *audio_data, int32_t num_frames)
 {
+    float *out = (float *)audio_data;
+    int channels = g_channels;
+    int frame;
+    int channel;
+
     (void)stream;
     (void)user_data;
 
-    synth_render(&g_synth, (float *)audio_data, (int)num_frames);
+    synth_render(&g_synth, out, (int)num_frames);
+
+    /* The engine is mono but the device decides how many channels it grants.
+       Expanding from the back lets the same buffer hold both, with no scratch
+       memory and no allocation on the audio thread. */
+    for (frame = (int)num_frames - 1; channels > 1 && frame >= 0; --frame) {
+        float sample = out[frame];
+
+        for (channel = 0; channel < channels; ++channel) {
+            out[frame * channels + channel] = sample;
+        }
+    }
+
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
 
-/* Fires on another thread when the device goes away (headphones unplugged, for
-   instance). Closing the stream from in here would deadlock, so the app is
-   expected to call stop() then start() again. */
+/* Fires on another thread when the device goes away, headphones unplugged being
+   the usual case. AAudio forbids closing the stream from inside this callback,
+   so recovery cannot happen here: the stream stays dead, silently, until the
+   app calls stop() and then start() again. That is the app's job and start()
+   says so. */
 static void error_callback(AAudioStream *stream, void *user_data, aaudio_result_t error)
 {
     (void)stream;
@@ -50,6 +70,7 @@ JNIEXPORT jboolean JNICALL Java_com_kidoe_synth_SynthEngine_start(JNIEnv *env, j
     AAudioStreamBuilder *builder = 0;
     aaudio_result_t result;
     int32_t burst;
+    int attempt;
 
     (void)env;
     (void)clazz;
@@ -65,18 +86,36 @@ JNIEXPORT jboolean JNICALL Java_com_kidoe_synth_SynthEngine_start(JNIEnv *env, j
     }
 
     AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_FLOAT);
-    AAudioStreamBuilder_setChannelCount(builder, 1);
     AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
-    AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_EXCLUSIVE);
     AAudioStreamBuilder_setDataCallback(builder, audio_callback, 0);
     AAudioStreamBuilder_setErrorCallback(builder, error_callback, 0);
 
-    result = AAudioStreamBuilder_openStream(builder, &g_stream);
+    /* Exclusive mono is what a groovebox wants, but it is not available
+       everywhere: emulators in particular downgrade exclusive mode internally
+       and then reject the configuration outright, which reads to the app as
+       silence with nothing in the log. So ask for the best case, then give up
+       one constraint at a time rather than failing hard. */
+    result = AAUDIO_ERROR_ILLEGAL_ARGUMENT;
+    for (attempt = 0; attempt < 3 && result != AAUDIO_OK; ++attempt) {
+        AAudioStreamBuilder_setSharingMode(builder, (attempt == 0) ? AAUDIO_SHARING_MODE_EXCLUSIVE
+                                                                  : AAUDIO_SHARING_MODE_SHARED);
+        /* 0 means "whatever the device prefers"; the callback adapts. */
+        AAudioStreamBuilder_setChannelCount(builder, (attempt < 2) ? 1 : 0);
+
+        result = AAudioStreamBuilder_openStream(builder, &g_stream);
+        if (result != AAUDIO_OK) {
+            LOGE("openStream attempt %d: %s", attempt, AAudio_convertResultToText(result));
+            g_stream = 0;
+        }
+    }
     AAudioStreamBuilder_delete(builder);
     if (result != AAUDIO_OK) {
-        LOGE("openStream: %s", AAudio_convertResultToText(result));
-        g_stream = 0;
         return JNI_FALSE;
+    }
+
+    g_channels = AAudioStream_getChannelCount(g_stream);
+    if (g_channels < 1) {
+        g_channels = 1;
     }
 
     /* The device grants whatever rate it likes, so retune before it can run.
@@ -118,13 +157,29 @@ JNIEXPORT jint JNICALL Java_com_kidoe_synth_SynthEngine_sampleRate(JNIEnv *env, 
     return g_stream ? (jint)AAudioStream_getSampleRate(g_stream) : 0;
 }
 
+/* Every control call goes through the queue rather than touching the engine.
+   These are invoked on whichever thread called the Java method, usually the UI
+   one, while the audio callback is rendering; synth_schedule is the only entry
+   point in the library safe to call from there. Frame 0 is always in the past,
+   so such an event is applied at the top of the next block. */
+static jboolean enqueue(synth_event_type_t type, uint64_t frame, int index, float value)
+{
+    synth_event_t event;
+
+    event.frame = frame;
+    event.type = type;
+    event.index = index;
+    event.value = value;
+    return synth_schedule(&g_synth, &event) ? JNI_TRUE : JNI_FALSE;
+}
+
 JNIEXPORT void JNICALL Java_com_kidoe_synth_SynthEngine_noteOn(JNIEnv *env, jclass clazz,
                                                                jint note, jfloat velocity)
 {
     (void)env;
     (void)clazz;
 
-    synth_note_on(&g_synth, (int)note, (float)velocity);
+    enqueue(SYNTH_EVENT_NOTE_ON, 0, (int)note, (float)velocity);
 }
 
 JNIEXPORT void JNICALL Java_com_kidoe_synth_SynthEngine_noteOff(JNIEnv *env, jclass clazz, jint note)
@@ -132,7 +187,7 @@ JNIEXPORT void JNICALL Java_com_kidoe_synth_SynthEngine_noteOff(JNIEnv *env, jcl
     (void)env;
     (void)clazz;
 
-    synth_note_off(&g_synth, (int)note);
+    enqueue(SYNTH_EVENT_NOTE_OFF, 0, (int)note, 0.0f);
 }
 
 JNIEXPORT void JNICALL Java_com_kidoe_synth_SynthEngine_allNotesOff(JNIEnv *env, jclass clazz)
@@ -140,7 +195,7 @@ JNIEXPORT void JNICALL Java_com_kidoe_synth_SynthEngine_allNotesOff(JNIEnv *env,
     (void)env;
     (void)clazz;
 
-    synth_all_notes_off(&g_synth);
+    enqueue(SYNTH_EVENT_ALL_NOTES_OFF, 0, 0, 0.0f);
 }
 
 JNIEXPORT void JNICALL Java_com_kidoe_synth_SynthEngine_setParam(JNIEnv *env, jclass clazz,
@@ -149,7 +204,50 @@ JNIEXPORT void JNICALL Java_com_kidoe_synth_SynthEngine_setParam(JNIEnv *env, jc
     (void)env;
     (void)clazz;
 
-    synth_set_param(&g_synth, (synth_param_t)param, (float)norm);
+    enqueue(SYNTH_EVENT_PARAM, 0, (int)param, (float)norm);
+}
+
+JNIEXPORT jlong JNICALL Java_com_kidoe_synth_SynthEngine_frameTime(JNIEnv *env, jclass clazz)
+{
+    (void)env;
+    (void)clazz;
+
+    return (jlong)synth_frame_time(&g_synth);
+}
+
+JNIEXPORT jint JNICALL Java_com_kidoe_synth_SynthEngine_framesPerBurst(JNIEnv *env, jclass clazz)
+{
+    (void)env;
+    (void)clazz;
+
+    return g_stream ? (jint)AAudioStream_getFramesPerBurst(g_stream) : 0;
+}
+
+JNIEXPORT jboolean JNICALL Java_com_kidoe_synth_SynthEngine_scheduleNoteOn(
+    JNIEnv *env, jclass clazz, jlong frame, jint note, jfloat velocity)
+{
+    (void)env;
+    (void)clazz;
+
+    return enqueue(SYNTH_EVENT_NOTE_ON, (uint64_t)frame, (int)note, (float)velocity);
+}
+
+JNIEXPORT jboolean JNICALL Java_com_kidoe_synth_SynthEngine_scheduleNoteOff(
+    JNIEnv *env, jclass clazz, jlong frame, jint note)
+{
+    (void)env;
+    (void)clazz;
+
+    return enqueue(SYNTH_EVENT_NOTE_OFF, (uint64_t)frame, (int)note, 0.0f);
+}
+
+JNIEXPORT jboolean JNICALL Java_com_kidoe_synth_SynthEngine_scheduleParam(
+    JNIEnv *env, jclass clazz, jlong frame, jint param, jfloat norm)
+{
+    (void)env;
+    (void)clazz;
+
+    return enqueue(SYNTH_EVENT_PARAM, (uint64_t)frame, (int)param, (float)norm);
 }
 
 JNIEXPORT jfloat JNICALL Java_com_kidoe_synth_SynthEngine_getParam(JNIEnv *env, jclass clazz, jint param)

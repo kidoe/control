@@ -35,9 +35,15 @@ away for convenience.
   PC and silently breaks the microcontroller target.
 - **No allocation and no OS calls, ever.** The caller owns the `synth_t`, which
   is why its fields sit in the header: an MCU declares `static synth_t s;`.
-  1840 bytes at 8 voices.
+  3400 bytes at 8 voices, of which 1544 is the event queue.
 - **`synth_render()` is the only function for the audio callback**, and it is
-  real-time safe. Control calls are not synchronised; the host marshals them.
+  real-time safe. It also drains scheduled events, splitting the block at their
+  frame offsets so a sequencer step lands on its own frame.
+- **`synth_schedule()` is the only function safe to call from another thread.**
+  Everything else assumes the caller is the audio thread. It is lock-free and
+  never blocks, returning 0 when the fixed-size queue is full. A host driving
+  the engine from a UI or sequencer thread goes through it; calling
+  synth_note_on directly from there is the race this exists to close.
 - **Polyphony is a compile-time constant** (`SYNTH_MAX_VOICES`), so each voice
   count is a different program and CI tests 4, 8 and 32.
 - **Parameters are always normalized to [0, 1]**, with range, curve and name in
@@ -69,7 +75,7 @@ cmake --build build
 cd build && ctest --output-on-failure
 ```
 
-47 test functions, 113 assertions, no audio hardware needed. Spectra are
+65 test functions, 169 assertions, no audio hardware needed. Spectra are
 measured with a Goertzel probe at exact frequencies rather than asserted on the
 shape of the code, so the tests survive refactoring and catch real regressions.
 
@@ -85,12 +91,13 @@ Be honest about this line; a lot of it cannot be checked from a container.
   `-Wconversion -Werror`, at three voice counts, plus the headers compiled as
   C++ and a build with parameter names stripped.
 - **Compiles but has never run**: the desktop backend. No sound card in CI.
-- **Type-checks but has never run**: the Android JNI bridge. Its JNI signatures
-  match what `javac -h` generates, and `synth_jni.c` compiles clean against the
-  real `aaudio/AAudio.h` from three different NDK releases, so the function
-  names, argument types and constants are right. It has never been linked
-  against `libaaudio` or run on a device, so whether the stream actually opens
-  is still unknown.
+- **Runs on a device, per the Groovedroid work, but nothing here proves it**:
+  the Android JNI bridge. Its signatures match what `javac -h` generates and it
+  compiles clean against the real `aaudio/AAudio.h` from three NDK releases,
+  which is all this repository can check without an NDK. Reported working at
+  48 kHz with 96-frame bursts on real hardware; reported failing to open on an
+  API 37 emulator, which is why start() now degrades from exclusive mono rather
+  than giving up. Neither report is reproducible from here.
 - **Never built**: any embedded target. "Runs on a microcontroller" is a design
   claim backed by the dependency and memory checks, not by hardware.
 
