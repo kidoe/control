@@ -289,8 +289,9 @@ Be honest about this line; a lot of it cannot be checked from a container.
     for one or two voices on an overclocked Pico and unproven until someone
     renders on the real thing.
 
-  **On fixed point**, which is the standing question for the M0: the per-symbol
-  profile answers it. Before this work 93.8% of every instruction on the M0 was
+  **On fixed point**, which is the standing question for the M0:
+  `tools/bench-arm/profile.sh` answers it, by attributing every instruction to
+  the function it ran in. Before this work 93.8% of every instruction on the M0 was
   inside `__aeabi_*` float helpers, of which 20.8% was `__aeabi_fdiv` — and
   division turned out to be removable *in float*, by keeping a rate beside each
   envelope time and by saying that zero drive is the identity. That is done, and
