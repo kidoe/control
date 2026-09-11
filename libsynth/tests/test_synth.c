@@ -2327,9 +2327,12 @@ static void test_lfo_retriggers_with_the_note(void)
     static float buf[512];
 
     /* Vibrato that starts wherever the LFO happened to be would make the same
-       note sound different each time it is struck. */
+       note sound different each time it is struck. A destination has to be set
+       for there to be anything to hear: the engine does not run an LFO that
+       reaches nothing, so with every depth centred its phase would not move. */
     synth_init(&s, SR);
     synth_set_param(&s, SYNTH_PARAM_LFO_RATE, 0.5f);
+    synth_set_param(&s, SYNTH_PARAM_LFO_TO_CUTOFF, 1.0f);
     synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
     synth_note_on(&s, 60, 1.0f);
     synth_render(&s, buf, 512);
@@ -2560,6 +2563,93 @@ static void test_centring_the_amount_puts_the_note_back(void)
     CHECK_NEAR(rendered_hz(&s, buf, 512, 0.2f), 440.0f, 8.0f);
 }
 
+/* The engine skips any modulation whose depth is centred, because work nothing
+   listens to is pure cost. These three pin the consequence: silent when off,
+   and awake the moment a depth is turned up. */
+static void test_a_modulation_nothing_hears_changes_nothing(void)
+{
+    synth_t slow, fast;
+    static float a[600], b[600];
+    int i;
+
+    /* Same patch, two LFO rates, every destination centred. If the LFO reached
+       anything at all these would diverge. */
+    synth_init(&slow, SR);
+    synth_init(&fast, SR);
+    synth_set_param(&slow, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&fast, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&slow, SYNTH_PARAM_LFO_RATE, 0.1f);
+    synth_set_param(&fast, SYNTH_PARAM_LFO_RATE, 1.0f);
+    synth_note_on(&slow, 60, 1.0f);
+    synth_note_on(&fast, 60, 1.0f);
+    synth_render(&slow, a, 600);
+    synth_render(&fast, b, 600);
+
+    for (i = 0; i < 600; ++i) {
+        CHECK_NEAR(a[i], b[i], 0.0f);
+    }
+}
+
+static void test_turning_a_depth_up_mid_note_wakes_the_lfo(void)
+{
+    synth_t s;
+    static float buf[256];
+    float lowest = 1e9f, highest = -1e9f;
+    int block;
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_CUTOFF, 0.5f);
+    synth_set_param(&s, SYNTH_PARAM_LFO_RATE, 0.6f);
+    synth_note_on(&s, 60, 1.0f);
+    render_seconds(&s, buf, 256, 0.5f); /* nothing listening, so nothing moves */
+    CHECK(s.voices[0].lfo.phase == 0.0f);
+
+    synth_set_param(&s, SYNTH_PARAM_LFO_TO_CUTOFF, 1.0f);
+    for (block = 0; block < 120; ++block) {
+        float octaves;
+
+        synth_render(&s, buf, 256);
+        octaves = voice_cutoff_octaves(&s);
+        if (octaves < lowest) {
+            lowest = octaves;
+        }
+        if (octaves > highest) {
+            highest = octaves;
+        }
+    }
+    CHECK(highest > lowest * 1.5f);
+}
+
+static void test_a_filter_nothing_modulates_is_left_alone(void)
+{
+    synth_t s;
+    static float buf[256];
+    float settled, later, opened;
+
+    /* Envelope amount centred, no key tracking, LFO centred: the cutoff has
+       nothing to follow, so it must not move. */
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_CUTOFF, 0.4f);
+    synth_note_on(&s, 60, 1.0f);
+    synth_render(&s, buf, 256);
+    settled = voice_cutoff_octaves(&s);
+    render_seconds(&s, buf, 256, 0.5f);
+    later = voice_cutoff_octaves(&s);
+    CHECK_NEAR(later, settled, 0.0f);
+
+    /* And the moment the envelope is given an amount, it follows again. It
+       starts from where it was frozen, which is the one thing this costs: an
+       envelope that has not been running has not decayed either. */
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_ATTACK, 0.0f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_AMOUNT, 1.0f); /* +4 octaves */
+    render_seconds(&s, buf, 256, 0.05f);
+    opened = voice_cutoff_octaves(&s);
+    CHECK(opened > settled * 2.0f);
+}
+
 int main(void)
 {
     test_note_to_hz();
@@ -2660,6 +2750,9 @@ int main(void)
     test_a_short_patch_loads_at_its_defaults();
     test_pitch_env_restarts_on_a_retrigger();
     test_centring_the_amount_puts_the_note_back();
+    test_a_modulation_nothing_hears_changes_nothing();
+    test_turning_a_depth_up_mid_note_wakes_the_lfo();
+    test_a_filter_nothing_modulates_is_left_alone();
 
     if (g_failures == 0) {
         printf("all tests passed\n");

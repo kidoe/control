@@ -3,7 +3,7 @@
 A polyphonic synthesis core in C11 that runs from the same source on a desktop,
 on a microcontroller, and on Android.
 
-It is small — 7.6 KB of code and 4.6 KB of RAM at eight voices on a Cortex-M4F —
+It is small — 7.9 KB of code and 4.6 KB of RAM at eight voices on a Cortex-M4F —
 because it has no dependencies at all. No libm, no malloc, no threads, no OS. Pitch, curves, sine,
 tangent and exponentials are arithmetic; the caller owns the memory; the audio
 callback calls one function.
@@ -54,6 +54,11 @@ and the order the units are wired in `synth_render()`.
   forty milliseconds is a kick drum; the same note without the sweep is a beep.
 - **Amplifier** — per-note level, velocity sensitivity, and a soft saturation
   that is exactly the identity when the drive is zero.
+
+Every modulation depth is bipolar and neutral at its centre, and the engine does
+not compute one that reaches nothing: a patch that has not asked for an
+envelope, an LFO or a sweep does not pay for it, which is 43% of the render loop
+on a Cortex-M4F.
 
 Everything is driven through parameters normalized to `[0, 1]`, with range,
 curve and name in a descriptor table, so a MIDI CC, an ADC reading and a UI
@@ -128,7 +133,7 @@ program; CI tests 4, 8 and 32.
 The point of this library is portability, so the claims about it are measured
 rather than asserted, and the ones that are not are labelled.
 
-- **Verified here**: the core and its 98 tests, under gcc and clang with
+- **Verified here**: the core and its 101 tests, under gcc and clang with
   `-Wconversion -Werror`, at three voice counts, with the headers compiled as
   C++ and with parameter names stripped. Spectra are measured with a Goertzel
   probe at exact frequencies rather than asserted on the shape of the code, and
@@ -142,11 +147,11 @@ rather than asserted, and the ones that are not are labelled.
   On Cortex-M4F the whole library needs one symbol: `memset`.
 - **Measured on emulated silicon**: `tools/bench-arm/run.sh` renders a second
   of audio on QEMU's Cortex-M0 and Cortex-M4F models and counts instructions
-  with a TCG plugin. Eight voices cost 90.6 M instructions a second on the M4F
-  and 2693 M on the M0 — soft float is about 30x the whole render loop, not the
-  modest per-call tax the symbol list suggests. So an M4F-class part runs this
-  comfortably at four voices and at its limit near eight, and an RP2040 cannot
-  run even one voice in real time; reaching an M0+ means a fixed-point path.
+  with a TCG plugin. Eight voices cost 51.7 M instructions a second on the M4F
+  and 1593 M on the M0 — soft float is about 30x the whole render loop, not the
+  modest per-call tax the symbol list suggests. So an M4F-class part runs eight
+  voices in about a third of a 168 MHz core, and an RP2040 still cannot manage
+  one voice in real time; reaching an M0+ means a fixed-point path.
   Instructions are not cycles, so those are floors.
 - **Not verified**: the desktop backend has never been run, and no embedded
   target has ever run on real silicon. `CLAUDE.md` keeps the full list, kept

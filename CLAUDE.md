@@ -53,7 +53,20 @@ away for convenience.
   count is a different program and CI tests 4, 8 and 32.
 - **Parameters are always normalized to [0, 1]**, with range, curve and name in
   a descriptor table, so a MIDI CC, an ADC reading and a UI slider all map onto
-  them the same way.
+  them the same way. Reading one is not free — a bounds check, a clamp, a curve
+  and a scale — so the render loop denormalizes the controls it needs once per
+  block into a `mod_t` rather than per voice per control tick. It used to do the
+  latter, and a fifth of every instruction the library executed went on looking
+  up parameters that could not have changed.
+- **Modulation that reaches nothing is not computed.** Every depth in the
+  library is bipolar and neutral at its centre, so "does this reach anything"
+  is one comparison, and it is loop-invariant: `render_block()` decides once per
+  block whether to advance each envelope and the LFO and whether to retune the
+  oscillator and the filter. A patch that has not asked for modulation pays for
+  none of it, which is 43% of the render loop on a Cortex-M4F. The one thing it
+  costs is that an LFO nothing listens to does not free-run, so turning a depth
+  up mid-note starts the wobble from where the note began rather than from a
+  phase that had been advancing unheard.
 - **The parameter enum is append-only.** A host stores a patch as the positional
   array `synth_save_patch()` writes, so an index that moved would reinterpret
   every saved sound without anything failing. New parameters go on the end;
@@ -68,20 +81,23 @@ global is the const parameter table, and all three translation units have an
 empty `.bss` — so instances are independent by construction. Each carries its
 own parameters, voices and event queue, and the host sums their outputs.
 
-Measured at 48 kHz in 96-frame blocks, eight voices sounding:
+Counted with callgrind, at 48 kHz in 96-frame blocks, for one second of audio:
 
-| | cost |
+| | instructions |
 |---|---|
-| one instance, 8 notes | 0.74% of a core |
-| eight instances, 1 note each | 0.80% |
-| eight instances, all silent | 0.12% |
-| eight instances, 8 notes each (64 voices) | 6.66% |
+| one instance, 8 notes | 57.5 M |
+| eight instances, 1 note each | 89.8 M |
+| eight instances, all silent | 37.0 M |
+| eight instances, 8 notes each (64 voices) | 459.5 M |
 
-So cost follows sounding voices, not instances, and the floor for holding idle
-parts is small. What does cost something is that every block scans all
-`SYNTH_MAX_VOICES` slots per instance whether or not they sound: dropping it
-from 8 to 2 takes eight one-note parts from 0.80% to 0.67%. Size it to what one
-*track* needs, not the whole instrument.
+Cost follows sounding voices, not instances: eight notes cost 52.8 M whether
+they sit in one instance or in eight, once the idle floor is taken off. That
+floor is what an instance costs for existing — 4.6 M a second each, because
+every block scans all `SYNTH_MAX_VOICES` slots whether or not they sound. It is
+small beside a sounding voice at 6.6 M, but it is per instance and it is paid
+forever, so size the voice count to what one *track* needs rather than to the
+whole instrument: at `SYNTH_MAX_VOICES=2` the same eight one-note parts cost
+68.5 M instead of 89.8 M, and the idle floor drops from 37.0 M to 15.3 M.
 
 A patch is exactly the normalized parameters, so `synth_save_patch` and
 `synth_load_patch` move one track's sound around as a plain float array with no
@@ -122,22 +138,19 @@ order the units are actually wired in `synth_render()`.
   sine, triangle, square and sample-and-hold shapes. It reaches the cutoff in
   octaves, the pitch in semitones and the amplitude as a dip that can only take
   level away. All three depths ship at exactly zero, so the section changes no
-  existing patch. Vibrato is the one destination that costs anything, since
-  retuning the oscillator recomputes the VOSIM pulse layout, so it is skipped
-  entirely when its depth is zero: 8 voices cost 0.73% of a core with the filter
-  modulated and 0.86% with vibrato as well.
+  existing patch and, since nothing then listens, the LFO does not run at all.
+  Vibrato is the destination that costs most, because retuning the oscillator
+  recomputes the VOSIM pulse layout.
 - **Pitch envelope**: attack and decay only, in octaves, applied to the
   oscillator's frequency at the same control-rate tick that retunes the filter.
   It is what makes percussion possible: a sine falling an octave and a half onto
   a low note in forty milliseconds is a kick drum, where the same note without
   the sweep is a tuned beep. Negative amounts sweep up onto the note instead.
   Its amount ships centred, so it is silent in every patch that predates it, and
-  the envelope is not advanced at all while it is: running it unconditionally
-  cost about 1.2% more instructions per second of audio on patches that never
-  sweep, which is the kind of tax a section nobody switched on should not
-  charge. With it switched on, 8 voices go from 90.4 to 123.6 million
-  instructions a second — the same order as vibrato, and for the same reason,
-  since both force the oscillator to be retuned.
+  the envelope is not advanced while it is. With it switched on, 8 voices go
+  from 51.7 to 79.7 million instructions a second on a Cortex-M4F: it is the
+  most expensive modulation in the library, because it forces the oscillator to
+  be retuned on every control tick and that relays out the VOSIM pulses.
 - **Amplifier**: per-note level, velocity sensitivity, and soft saturation
   `x(1+d)/(1+d|x|)`, which is the identity at `d = 0` and provably keeps
   `|x| <= 1` mapped to `|y| <= 1`.
@@ -162,7 +175,7 @@ cmake --build build
 cd build && ctest --output-on-failure
 ```
 
-98 test functions, 249 assertions, no audio hardware needed. Spectra are
+101 test functions, 254 assertions, no audio hardware needed. Spectra are
 measured with a Goertzel probe at exact frequencies rather than asserted on the
 shape of the code, so the tests survive refactoring and catch real regressions.
 
@@ -188,7 +201,7 @@ Be honest about this line; a lot of it cannot be checked from a container.
 - **Cross-compiles and fits, but has never run**: bare metal ARM. CI builds the
   library and `backends/embedded/rp2040_example.c` for Cortex-M0+ and
   Cortex-M4F with `-Wconversion -Werror` and runs the dependency check on both.
-  Measured at 8 voices: 8.4 KB of flash and 4.6 KB of RAM on M0+, 7.6 KB and
+  Measured at 8 voices: 8.6 KB of flash and 4.6 KB of RAM on M0+, 7.9 KB and
   4.6 KB on M4F — on an RP2040 that is 0.4% of its flash and 1.7% of its SRAM,
   so memory is not the constraint.
 
@@ -198,11 +211,11 @@ Be honest about this line; a lot of it cannot be checked from a container.
 
   | instructions per second of audio | M4F | M0 |
   |---|---|---|
-  | silent, 8 empty slots | 3.7 M | 9.4 M |
-  | sine, 1 voice | 14.5 M | 346 M |
-  | sine, 8 voices | 90.6 M | 2693 M |
-  | saw, 8 voices | 90.2 M | 2466 M |
-  | sine, 8 voices + pitch sweep | 124 M | 3773 M |
+  | silent, 8 empty slots | 3.7 M | 10.4 M |
+  | sine, 1 voice | 9.7 M | 209 M |
+  | sine, 8 voices | 51.7 M | 1593 M |
+  | saw, 8 voices | 51.3 M | 1367 M |
+  | sine, 8 voices + pitch sweep | 79.7 M | 2605 M |
 
   Read these as a floor. QEMU counts instructions retired, not cycles, and
   models neither flash wait states nor the multi-cycle loads and taken branches
@@ -216,14 +229,16 @@ Be honest about this line; a lot of it cannot be checked from a container.
     per call" a reader might assume from the symbol list — thirty times the
     whole render loop.
   - **M4F-class hardware is the supported target, and now with a number.**
-    90.6 M instructions a second for 8 voices is 54% of a 168 MHz STM32F405 at
-    one instruction per cycle. Since that is a floor, treat 8 voices as the
-    ceiling and 4 as comfortable.
-  - **The Pico cannot run this core, and no amount of tuning changes that.** A
-    single sine voice needs 346 M instructions per second of audio, which is
-    2.8 times a 125 MHz RP2040 core at one instruction per cycle. Overclocked
-    to 250 MHz it still does not fit one voice. Reaching an M0+ means a
-    fixed-point path, not a smaller voice count.
+    51.7 M instructions a second for 8 voices is 31% of a 168 MHz STM32F405 at
+    one instruction per cycle. Since that is a floor, treat 8 voices as usable
+    and leave room for whatever else the firmware does.
+  - **The Pico is still out of reach, but no longer by an order of magnitude.**
+    A single sine voice needs 209 M instructions per second of audio, 1.7 times
+    a 125 MHz RP2040 core at one instruction per cycle, where before the
+    modulation skips it was 2.8 times. Overclocked to 250 MHz one voice is
+    within sight of fitting at one instruction per cycle — which real silicon
+    does not reach, so it still does not fit in practice. The float path is not
+    an RP2040 target; reaching one means fixed point.
 
 ## Conventions
 
