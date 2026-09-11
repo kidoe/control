@@ -66,6 +66,12 @@ typedef enum {
     SYNTH_PARAM_LFO_TO_CUTOFF,
     SYNTH_PARAM_LFO_TO_PITCH,
     SYNTH_PARAM_LFO_TO_AMP,
+    /* New parameters go on the end, never in the middle: a host that stores a
+       patch as the positional float array synth_save_patch() writes would
+       silently load every old patch wrong if an index moved. */
+    SYNTH_PARAM_PITCH_ENV_AMOUNT,
+    SYNTH_PARAM_PITCH_ENV_ATTACK,
+    SYNTH_PARAM_PITCH_ENV_DECAY,
     SYNTH_PARAM_COUNT
 } synth_param_t;
 
@@ -91,6 +97,7 @@ typedef struct {
     synth_amp_t amp;
     synth_env_t amp_env;
     synth_env_t filter_env;
+    synth_env_t pitch_env;
     synth_lfo_t lfo;
     float amp_base;    /* the velocity part of the amp level, before tremolo */
     float lfo_value;   /* held between control-rate updates */
@@ -226,6 +233,14 @@ float synth_get_param(const synth_t *s, synth_param_t param);
  */
 void synth_save_patch(const synth_t *s, float patch[SYNTH_PARAM_COUNT]);
 void synth_load_patch(synth_t *s, const float patch[SYNTH_PARAM_COUNT]);
+
+/* Loads a patch that a build with fewer parameters wrote. `count` is how many
+   floats the array holds; the rest take their defaults, which is the value that
+   patch was implicitly using. Zero-filling them instead would be wrong for
+   every bipolar control, where the centre is neutral and zero is full negative:
+   a saved sound would come back four octaves down rather than unchanged. Extra
+   values, from a build with more parameters than this one, are ignored. */
+void synth_load_patch_n(synth_t *s, const float *patch, int count);
 
 /* Descriptors, for hosts that build UI or MIDI maps from the parameter list. */
 const synth_param_info_t *synth_param_info(synth_param_t param);

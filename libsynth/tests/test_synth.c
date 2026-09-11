@@ -2343,6 +2343,223 @@ static void test_lfo_retriggers_with_the_note(void)
     CHECK(s.voices[0].lfo_value == 0.0f);
 }
 
+/* Frequency the engine is actually sounding, counted from its output rather
+   than read out of the voice: upward zero crossings over the window. Only
+   meaningful for a waveform that crosses zero twice a cycle, so the tests below
+   leave the oscillator on its default sine. */
+static float rendered_hz(synth_t *s, float *buf, int cap, float seconds)
+{
+    int total = (int)(SR * seconds);
+    int crossings = 0;
+    float prev = 0.0f;
+    int done = 0;
+
+    while (done < total) {
+        int n = (total - done < cap) ? (total - done) : cap;
+        int i;
+
+        synth_render(s, buf, n);
+        for (i = 0; i < n; ++i) {
+            if (prev <= 0.0f && buf[i] > 0.0f) {
+                ++crossings;
+            }
+            prev = buf[i];
+        }
+        done += n;
+    }
+    return (float)crossings / seconds;
+}
+
+/* A kick is a fast sweep downwards onto the note, so the note has to start high
+   and settle. Measured in the audio, because that is the part a listener
+   hears. */
+static void test_pitch_env_sweeps_the_note_down(void)
+{
+    synth_t s;
+    static float buf[512];
+    float at_start, at_end;
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_AMOUNT, 0.75f); /* +2 octaves */
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_ATTACK, 0.0f);  /* instant */
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_DECAY, 0.63f);  /* about a second */
+    synth_note_on(&s, 48, 1.0f); /* 130.8 Hz */
+
+    at_start = rendered_hz(&s, buf, 512, 0.05f);
+    render_seconds(&s, buf, 512, 1.5f);
+    at_end = rendered_hz(&s, buf, 512, 0.2f);
+
+    /* Four times up at the peak, decaying through the first window, so the
+       measured start lands somewhere near three times the note. */
+    CHECK(at_start > at_end * 2.5f);
+    CHECK_NEAR(at_end, 130.8f, 6.0f);
+}
+
+/* Negative amount is the siren, sweeping up onto the note instead. */
+static void test_pitch_env_amount_is_bipolar(void)
+{
+    synth_t s;
+    static float buf[512];
+    float at_start, at_end;
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_AMOUNT, 0.25f); /* -2 octaves */
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_ATTACK, 0.0f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_DECAY, 0.63f);
+    synth_note_on(&s, 60, 1.0f); /* 261.6 Hz */
+
+    at_start = rendered_hz(&s, buf, 512, 0.05f);
+    render_seconds(&s, buf, 512, 1.5f);
+    at_end = rendered_hz(&s, buf, 512, 0.2f);
+
+    CHECK(at_end > at_start * 2.5f);
+    CHECK_NEAR(at_end, 261.6f, 8.0f);
+}
+
+/* The decay is what separates a drum from a siren, so it has to be the control
+   that decides how long the sweep lasts. */
+static void test_pitch_env_decay_sets_the_sweep_length(void)
+{
+    synth_t s;
+    static float buf[512];
+    float quick, slow;
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_AMOUNT, 0.75f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_ATTACK, 0.0f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_DECAY, 0.29f); /* about 100 ms */
+    synth_note_on(&s, 48, 1.0f);
+    render_seconds(&s, buf, 512, 0.15f);
+    quick = rendered_hz(&s, buf, 512, 0.1f);
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_AMOUNT, 0.75f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_ATTACK, 0.0f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_DECAY, 0.79f); /* about two seconds */
+    synth_note_on(&s, 48, 1.0f);
+    render_seconds(&s, buf, 512, 0.15f);
+    slow = rendered_hz(&s, buf, 512, 0.1f);
+
+    /* At the same moment the quick one is already home and the slow one has
+       barely moved. */
+    CHECK_NEAR(quick, 130.8f, 8.0f);
+    CHECK(slow > quick * 2.0f);
+}
+
+/* Compatibility: the section has to be silent in every patch written before it
+   existed, which means its default amount is exactly no sweep. */
+static void test_pitch_env_defaults_change_nothing(void)
+{
+    synth_t s;
+    static float buf[512];
+
+    CHECK_NEAR(synth_param_denorm(SYNTH_PARAM_PITCH_ENV_AMOUNT,
+                                  synth_param_info(SYNTH_PARAM_PITCH_ENV_AMOUNT)->default_norm),
+               0.0f, 1e-6f);
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_note_on(&s, 69, 1.0f);
+    CHECK_NEAR(rendered_hz(&s, buf, 512, 0.2f), 440.0f, 8.0f);
+    CHECK_NEAR(rendered_hz(&s, buf, 512, 0.2f), 440.0f, 8.0f);
+}
+
+/* The new parameters have to sit past every old one, because a host stores a
+   patch as the positional array synth_save_patch() writes and an index that
+   moved would reinterpret every saved sound in silence. */
+static void test_new_parameters_are_appended(void)
+{
+    CHECK(SYNTH_PARAM_PITCH_ENV_AMOUNT == SYNTH_PARAM_LFO_TO_AMP + 1);
+    CHECK(SYNTH_PARAM_PITCH_ENV_DECAY == SYNTH_PARAM_COUNT - 1);
+    /* The indices this library has published, spelled out so that moving one
+       fails here rather than at a host that already has patches on disk. */
+    CHECK(SYNTH_PARAM_MASTER_GAIN == 0);
+    CHECK(SYNTH_PARAM_FILTER_ENV_AMOUNT == 17);
+    CHECK(SYNTH_PARAM_AMP_VELOCITY == 24);
+    CHECK(SYNTH_PARAM_LFO_TO_AMP == 29);
+}
+
+/* A patch from a build with fewer parameters. Filling what it does not carry
+   with zeros would put the new bipolar amount at its negative extreme, so the
+   short load fills from the defaults instead and the old sound comes back
+   unchanged. */
+static void test_a_short_patch_loads_at_its_defaults(void)
+{
+    synth_t s;
+    static float buf[512];
+    float patch[SYNTH_PARAM_COUNT];
+    int older = SYNTH_PARAM_COUNT - 3;
+    int i;
+
+    synth_init(&s, SR);
+    synth_save_patch(&s, patch);
+    for (i = older; i < SYNTH_PARAM_COUNT; ++i) {
+        patch[i] = 0.0f; /* what a zero-filled buffer would hand the loader */
+    }
+
+    synth_load_patch_n(&s, patch, older);
+    CHECK_NEAR(synth_get_param(&s, SYNTH_PARAM_PITCH_ENV_AMOUNT), 0.5f, 1e-6f);
+
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_note_on(&s, 69, 1.0f);
+    CHECK_NEAR(rendered_hz(&s, buf, 512, 0.2f), 440.0f, 8.0f);
+
+    /* And the same array loaded whole really is the broken case, so the test
+       above is measuring something. */
+    synth_load_patch(&s, patch);
+    CHECK(synth_get_param(&s, SYNTH_PARAM_PITCH_ENV_AMOUNT) < 0.5f);
+}
+
+/* Striking the same note again reuses its voice, so the sweep has to start over
+   rather than carry on from wherever the last one had fallen to. */
+static void test_pitch_env_restarts_on_a_retrigger(void)
+{
+    synth_t s;
+    static float buf[512];
+    float first, again;
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_AMOUNT, 0.75f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_ATTACK, 0.0f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_DECAY, 0.63f);
+
+    synth_note_on(&s, 48, 1.0f);
+    first = rendered_hz(&s, buf, 512, 0.05f);
+    render_seconds(&s, buf, 512, 1.5f); /* sweep long over */
+
+    synth_note_on(&s, 48, 1.0f);
+    again = rendered_hz(&s, buf, 512, 0.05f);
+
+    CHECK_NEAR(again, first, first * 0.1f);
+    CHECK(again > 300.0f);
+}
+
+/* Turning the amount back to neutral while a note sounds has to put that note
+   back in tune. The render loop stops retuning the oscillator once nothing
+   modulates the pitch, so a control that is centred mid-sweep is the one moment
+   a stale offset could stick. */
+static void test_centring_the_amount_puts_the_note_back(void)
+{
+    synth_t s;
+    static float buf[512];
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_AMOUNT, 0.75f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_ATTACK, 0.0f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_DECAY, 0.79f); /* still high up */
+    synth_note_on(&s, 69, 1.0f);
+    render_seconds(&s, buf, 512, 0.05f);
+
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_AMOUNT, 0.5f);
+    CHECK_NEAR(rendered_hz(&s, buf, 512, 0.2f), 440.0f, 8.0f);
+}
+
 int main(void)
 {
     test_note_to_hz();
@@ -2435,6 +2652,14 @@ int main(void)
     test_patch_round_trips();
     test_patch_load_clamps_and_survives_rubbish();
     test_patches_keep_instances_apart();
+    test_pitch_env_sweeps_the_note_down();
+    test_pitch_env_amount_is_bipolar();
+    test_pitch_env_decay_sets_the_sweep_length();
+    test_pitch_env_defaults_change_nothing();
+    test_new_parameters_are_appended();
+    test_a_short_patch_loads_at_its_defaults();
+    test_pitch_env_restarts_on_a_retrigger();
+    test_centring_the_amount_puts_the_note_back();
 
     if (g_failures == 0) {
         printf("all tests passed\n");

@@ -53,6 +53,9 @@ jobs:
       - name: The core must link against nothing
         run: sh libsynth/tools/check-no-external-deps.sh build/libsynth.a
 
+      - name: The Android bridge must mirror the parameter enum
+        run: sh libsynth/tools/check-java-constants.sh libsynth
+
       - name: Headers must be usable from C++
         run: |
           cat > /tmp/cpp_check.cpp <<'EOF'

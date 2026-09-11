@@ -39,6 +39,26 @@ public final class SynthEngine {
     public static final int PARAM_FILTER_KEY_TRACK = 22;
     public static final int PARAM_AMP_DRIVE = 23;
     public static final int PARAM_AMP_VELOCITY = 24;
+    public static final int PARAM_LFO_RATE = 25;
+    public static final int PARAM_LFO_SHAPE = 26;
+    public static final int PARAM_LFO_TO_CUTOFF = 27;
+    public static final int PARAM_LFO_TO_PITCH = 28;
+    public static final int PARAM_LFO_TO_AMP = 29;
+    /**
+     * Pitch envelope: an attack-decay sweep of the oscillator's frequency,
+     * which is what makes a drum a drum. The amount is bipolar and in octaves,
+     * so its centre (0.5f) is no sweep at all, positive falls onto the note and
+     * negative rises onto it. A kick is a positive amount with a short decay.
+     */
+    public static final int PARAM_PITCH_ENV_AMOUNT = 30;
+    public static final int PARAM_PITCH_ENV_ATTACK = 31;
+    public static final int PARAM_PITCH_ENV_DECAY = 32;
+
+    /** Shape values for {@link #PARAM_LFO_SHAPE}, which is a stepped parameter. */
+    public static final int LFO_SINE = 0;
+    public static final int LFO_TRIANGLE = 1;
+    public static final int LFO_SQUARE = 2;
+    public static final int LFO_RANDOM = 3;
 
     /** Waveform values for {@link #PARAM_OSC_WAVE}, which is a stepped parameter. */
     public static final int WAVE_SINE = 0;
@@ -86,6 +106,15 @@ public final class SynthEngine {
     public static native void noteOff(int note);
 
     public static native void allNotesOff();
+
+    /**
+     * Voices sounding right now, out of the fixed pool the core was built with.
+     * A meter rather than a synchronisation point: it reads state the audio
+     * thread owns, so the answer is a snapshot that may already be a block old.
+     * That is enough to see voice stealing, which with a small pool happens
+     * constantly and is otherwise invisible.
+     */
+    public static native int activeVoices();
 
     /** norm is [0, 1] and maps onto the parameter's own range and curve. */
     public static native void setParam(int param, float norm);

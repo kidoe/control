@@ -40,7 +40,7 @@ away for convenience.
   Cortex-M0+ cannot do at all.
 - **No allocation and no OS calls, ever.** The caller owns the `synth_t`, which
   is why its fields sit in the header: an MCU declares `static synth_t s;`.
-  3416 bytes at 8 voices on ARM32, of which 1544 is the event queue.
+  4184 bytes at 8 voices on ARM32, of which 1544 is the event queue.
 - **`synth_render()` is the only function for the audio callback**, and it is
   real-time safe. It also drains scheduled events, splitting the block at their
   frame offsets so a sequencer step lands on its own frame.
@@ -54,6 +54,11 @@ away for convenience.
 - **Parameters are always normalized to [0, 1]**, with range, curve and name in
   a descriptor table, so a MIDI CC, an ADC reading and a UI slider all map onto
   them the same way.
+- **The parameter enum is append-only.** A host stores a patch as the positional
+  array `synth_save_patch()` writes, so an index that moved would reinterpret
+  every saved sound without anything failing. New parameters go on the end;
+  `tools/check-java-constants.sh` fails CI when the Android bridge's copy of the
+  enum drifts from the header.
 
 ## Several parts at once
 
@@ -83,6 +88,12 @@ A patch is exactly the normalized parameters, so `synth_save_patch` and
 format of its own. It is positional and tied to this build's parameter list;
 anything meant to outlive a version change should store the names from
 `synth_param_info()` beside the values.
+
+A patch written by an older build is shorter than this one's list, and
+`synth_load_patch_n()` takes its length and fills the rest from the defaults.
+That is not the same as zero-filling: every bipolar control is neutral at its
+*centre*, so a zero-filled tail would load a saved sound four octaves down
+rather than unchanged.
 
 Two things the host owns:
 
@@ -115,6 +126,18 @@ order the units are actually wired in `synth_render()`.
   retuning the oscillator recomputes the VOSIM pulse layout, so it is skipped
   entirely when its depth is zero: 8 voices cost 0.73% of a core with the filter
   modulated and 0.86% with vibrato as well.
+- **Pitch envelope**: attack and decay only, in octaves, applied to the
+  oscillator's frequency at the same control-rate tick that retunes the filter.
+  It is what makes percussion possible: a sine falling an octave and a half onto
+  a low note in forty milliseconds is a kick drum, where the same note without
+  the sweep is a tuned beep. Negative amounts sweep up onto the note instead.
+  Its amount ships centred, so it is silent in every patch that predates it, and
+  the envelope is not advanced at all while it is: running it unconditionally
+  cost about 1.2% more instructions per second of audio on patches that never
+  sweep, which is the kind of tax a section nobody switched on should not
+  charge. With it switched on, 8 voices go from 90.4 to 123.6 million
+  instructions a second — the same order as vibrato, and for the same reason,
+  since both force the oscillator to be retuned.
 - **Amplifier**: per-note level, velocity sensitivity, and soft saturation
   `x(1+d)/(1+d|x|)`, which is the identity at `d = 0` and provably keeps
   `|x| <= 1` mapped to `|y| <= 1`.
@@ -139,7 +162,7 @@ cmake --build build
 cd build && ctest --output-on-failure
 ```
 
-90 test functions, 230 assertions, no audio hardware needed. Spectra are
+98 test functions, 249 assertions, no audio hardware needed. Spectra are
 measured with a Goertzel probe at exact frequencies rather than asserted on the
 shape of the code, so the tests survive refactoring and catch real regressions.
 
@@ -165,8 +188,8 @@ Be honest about this line; a lot of it cannot be checked from a container.
 - **Cross-compiles and fits, but has never run**: bare metal ARM. CI builds the
   library and `backends/embedded/rp2040_example.c` for Cortex-M0+ and
   Cortex-M4F with `-Wconversion -Werror` and runs the dependency check on both.
-  Measured at 8 voices: 8.1 KB of flash and 4.3 KB of RAM on M0+, 7.3 KB and
-  4.3 KB on M4F — on an RP2040 that is 0.3% of its flash and 1.5% of its SRAM,
+  Measured at 8 voices: 8.4 KB of flash and 4.6 KB of RAM on M0+, 7.6 KB and
+  4.6 KB on M4F — on an RP2040 that is 0.4% of its flash and 1.7% of its SRAM,
   so memory is not the constraint.
 
   CPU is, and nothing here measures it. An M0+ has no FPU, so each of the
