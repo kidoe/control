@@ -137,12 +137,13 @@ static void mod_load(const synth_t *s, mod_t *m)
 
 static void voice_apply_envelope(synth_t *s, synth_voice_t *v)
 {
-    v->amp_env.delay = synth_param_denorm(SYNTH_PARAM_AMP_DELAY, s->params[SYNTH_PARAM_AMP_DELAY]);
-    v->amp_env.attack = synth_param_denorm(SYNTH_PARAM_AMP_ATTACK, s->params[SYNTH_PARAM_AMP_ATTACK]);
-    v->amp_env.hold = synth_param_denorm(SYNTH_PARAM_AMP_HOLD, s->params[SYNTH_PARAM_AMP_HOLD]);
-    v->amp_env.decay = synth_param_denorm(SYNTH_PARAM_AMP_DECAY, s->params[SYNTH_PARAM_AMP_DECAY]);
-    v->amp_env.sustain = synth_param_denorm(SYNTH_PARAM_AMP_SUSTAIN, s->params[SYNTH_PARAM_AMP_SUSTAIN]);
-    v->amp_env.release = synth_param_denorm(SYNTH_PARAM_AMP_RELEASE, s->params[SYNTH_PARAM_AMP_RELEASE]);
+    synth_env_set_times(&v->amp_env,
+                        synth_param_denorm(SYNTH_PARAM_AMP_DELAY, s->params[SYNTH_PARAM_AMP_DELAY]),
+                        synth_param_denorm(SYNTH_PARAM_AMP_ATTACK, s->params[SYNTH_PARAM_AMP_ATTACK]),
+                        synth_param_denorm(SYNTH_PARAM_AMP_HOLD, s->params[SYNTH_PARAM_AMP_HOLD]),
+                        synth_param_denorm(SYNTH_PARAM_AMP_DECAY, s->params[SYNTH_PARAM_AMP_DECAY]),
+                        synth_param_denorm(SYNTH_PARAM_AMP_SUSTAIN, s->params[SYNTH_PARAM_AMP_SUSTAIN]),
+                        synth_param_denorm(SYNTH_PARAM_AMP_RELEASE, s->params[SYNTH_PARAM_AMP_RELEASE]));
 }
 
 static void voice_apply_osc(synth_t *s, synth_voice_t *v)
@@ -244,12 +245,12 @@ static void voice_tune_filter(const mod_t *m, synth_voice_t *v, float env_level)
 
 static void voice_apply_filter(synth_t *s, const mod_t *m, synth_voice_t *v)
 {
-    v->filter_env.delay = 0.0f;
-    v->filter_env.hold = 0.0f;
-    v->filter_env.attack = synth_param_denorm(SYNTH_PARAM_FILTER_ENV_ATTACK, s->params[SYNTH_PARAM_FILTER_ENV_ATTACK]);
-    v->filter_env.decay = synth_param_denorm(SYNTH_PARAM_FILTER_ENV_DECAY, s->params[SYNTH_PARAM_FILTER_ENV_DECAY]);
-    v->filter_env.sustain = synth_param_denorm(SYNTH_PARAM_FILTER_ENV_SUSTAIN, s->params[SYNTH_PARAM_FILTER_ENV_SUSTAIN]);
-    v->filter_env.release = synth_param_denorm(SYNTH_PARAM_FILTER_ENV_RELEASE, s->params[SYNTH_PARAM_FILTER_ENV_RELEASE]);
+    synth_env_set_times(&v->filter_env, 0.0f,
+                        synth_param_denorm(SYNTH_PARAM_FILTER_ENV_ATTACK, s->params[SYNTH_PARAM_FILTER_ENV_ATTACK]),
+                        0.0f,
+                        synth_param_denorm(SYNTH_PARAM_FILTER_ENV_DECAY, s->params[SYNTH_PARAM_FILTER_ENV_DECAY]),
+                        synth_param_denorm(SYNTH_PARAM_FILTER_ENV_SUSTAIN, s->params[SYNTH_PARAM_FILTER_ENV_SUSTAIN]),
+                        synth_param_denorm(SYNTH_PARAM_FILTER_ENV_RELEASE, s->params[SYNTH_PARAM_FILTER_ENV_RELEASE]));
     voice_tune_filter(m, v, v->filter_env.level);
 }
 
@@ -258,12 +259,11 @@ static void voice_apply_filter(synth_t *s, const mod_t *m, synth_voice_t *v)
    this one always falls back to nothing and stays there. */
 static void voice_apply_pitch(synth_t *s, synth_voice_t *v)
 {
-    v->pitch_env.delay = 0.0f;
-    v->pitch_env.hold = 0.0f;
-    v->pitch_env.attack = synth_param_denorm(SYNTH_PARAM_PITCH_ENV_ATTACK, s->params[SYNTH_PARAM_PITCH_ENV_ATTACK]);
-    v->pitch_env.decay = synth_param_denorm(SYNTH_PARAM_PITCH_ENV_DECAY, s->params[SYNTH_PARAM_PITCH_ENV_DECAY]);
-    v->pitch_env.sustain = 0.0f;
-    v->pitch_env.release = 0.0f;
+    synth_env_set_times(&v->pitch_env, 0.0f,
+                        synth_param_denorm(SYNTH_PARAM_PITCH_ENV_ATTACK, s->params[SYNTH_PARAM_PITCH_ENV_ATTACK]),
+                        0.0f,
+                        synth_param_denorm(SYNTH_PARAM_PITCH_ENV_DECAY, s->params[SYNTH_PARAM_PITCH_ENV_DECAY]),
+                        0.0f, 0.0f);
 }
 
 void synth_init(synth_t *s, float sample_rate)
@@ -361,9 +361,9 @@ void synth_set_sample_rate(synth_t *s, float sample_rate)
     for (i = 0; i < SYNTH_MAX_VOICES; ++i) {
         synth_voice_t *v = &s->voices[i];
 
-        v->amp_env.sample_rate = sample_rate;
-        v->filter_env.sample_rate = sample_rate;
-        v->pitch_env.sample_rate = sample_rate;
+        synth_env_set_sample_rate(&v->amp_env, sample_rate);
+        synth_env_set_sample_rate(&v->filter_env, sample_rate);
+        synth_env_set_sample_rate(&v->pitch_env, sample_rate);
         v->filter.sample_rate = sample_rate;
         v->osc.sample_rate = sample_rate;
         v->lfo.sample_rate = sample_rate;

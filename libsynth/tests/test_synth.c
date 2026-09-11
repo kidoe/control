@@ -1270,12 +1270,9 @@ static void test_envelope_stages(void)
     int i;
 
     synth_env_init(&env, SR);
-    env.delay = 0.0f;
-    env.attack = 0.1f;
-    env.hold = 0.0f;
-    env.decay = 0.1f;
-    env.sustain = 0.4f;
-    env.release = 0.1f;
+    /* Through the setter, not into the fields: each ramp keeps how far it
+       travels per sample, and that is derived from the times here. */
+    synth_env_set_times(&env, 0.0f, 0.1f, 0.0f, 0.1f, 0.4f, 0.1f);
 
     CHECK(!synth_env_is_active(&env));
     synth_env_gate_on(&env);
@@ -2715,6 +2712,80 @@ static void test_a_parameter_change_reaches_everything_it_should(void)
     }
 }
 
+/* And the unit on its own, which is where synth_env_set_sample_rate() is the
+   only thing that can put the derived rates right: the engine happens to reset
+   every voice's times when a note starts, so it would paper over this. */
+static int env_attack_samples(float sample_rate, int retune)
+{
+    synth_env_t env;
+    int i;
+
+    synth_env_init(&env, 44100.0f);
+    synth_env_set_times(&env, 0.0f, 0.25f, 0.0f, 1.0f, 1.0f, 1.0f);
+    if (retune) {
+        synth_env_set_sample_rate(&env, sample_rate);
+    } else {
+        env.sample_rate = sample_rate; /* the field alone, which is not enough */
+    }
+    synth_env_gate_on(&env);
+    for (i = 0; i < 400000; ++i) {
+        synth_env_next(&env);
+        if (env.stage != SYNTH_ENV_ATTACK && env.stage != SYNTH_ENV_DELAY) {
+            break;
+        }
+    }
+    return i;
+}
+
+static void test_an_envelope_retimes_itself_for_a_new_rate(void)
+{
+    int at_44k = env_attack_samples(44100.0f, 1);
+    int at_96k = env_attack_samples(96000.0f, 1);
+
+    /* A quarter of a second, counted in each rate's own samples. */
+    CHECK(at_44k > 11000 && at_44k < 11200);
+    CHECK(at_96k > 23900 && at_96k < 24100);
+}
+
+/* Envelope times are in seconds, so they have to survive a host that only
+   learns the device's real rate once the stream is open. Each ramp keeps how
+   far it travels per sample, which is the thing a rate change invalidates. */
+static void test_envelope_times_survive_a_sample_rate_change(void)
+{
+    synth_t s;
+    static float buf[256];
+    float at_44k, at_96k;
+    int i;
+
+    synth_init(&s, 44100.0f);
+    synth_set_param(&s, SYNTH_PARAM_AMP_ATTACK, 0.5f);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_note_on(&s, 60, 1.0f);
+    for (i = 0; i < 400; ++i) {
+        synth_render(&s, buf, 256);
+        if (s.voices[0].amp_env.stage != SYNTH_ENV_ATTACK) {
+            break;
+        }
+    }
+    at_44k = (float)(i * 256) / 44100.0f;
+
+    synth_init(&s, 44100.0f);
+    synth_set_param(&s, SYNTH_PARAM_AMP_ATTACK, 0.5f);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_sample_rate(&s, 96000.0f);
+    synth_note_on(&s, 60, 1.0f);
+    for (i = 0; i < 800; ++i) {
+        synth_render(&s, buf, 256);
+        if (s.voices[0].amp_env.stage != SYNTH_ENV_ATTACK) {
+            break;
+        }
+    }
+    at_96k = (float)(i * 256) / 96000.0f;
+
+    CHECK(at_44k > 0.05f); /* long enough that the comparison means something */
+    CHECK_NEAR(at_96k, at_44k, at_44k * 0.05f);
+}
+
 /* Portamento: a note starts on the pitch of the one before it and travels. */
 static void test_glide_starts_a_note_on_the_previous_pitch(void)
 {
@@ -3166,6 +3237,8 @@ int main(void)
     test_turning_a_depth_up_mid_note_wakes_the_lfo();
     test_a_filter_nothing_modulates_is_left_alone();
     test_a_parameter_change_reaches_everything_it_should();
+    test_an_envelope_retimes_itself_for_a_new_rate();
+    test_envelope_times_survive_a_sample_rate_change();
     test_glide_starts_a_note_on_the_previous_pitch();
     test_glide_time_sets_how_long_the_travel_takes();
     test_no_glide_by_default();

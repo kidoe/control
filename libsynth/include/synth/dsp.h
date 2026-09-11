@@ -113,7 +113,12 @@ typedef enum {
 } synth_env_stage_t;
 
 /* DAHDSR, matching the envelope shape of the JSyn prototype.
-   Times are in seconds, sustain is a level in [0, 1]. */
+   Times are in seconds, sustain is a level in [0, 1].
+
+   The times are set through synth_env_set_times() rather than written into the
+   struct, because each ramp also keeps how far it travels per sample. Dividing
+   by a time once per sample was 20% of every instruction this library executed
+   on a core without an FPU. */
 typedef struct {
     float delay;
     float attack;
@@ -123,13 +128,21 @@ typedef struct {
     float release;
 
     float sample_rate;
+    float dt;            /* derived: seconds per sample */
+    float attack_rate;   /* derived: the fraction of each ramp a sample covers */
+    float decay_rate;
+    float release_rate;
+
     float level;
-    float time;
+    float time;          /* seconds through delay and hold, a fraction elsewhere */
     float release_from;
     synth_env_stage_t stage;
 } synth_env_t;
 
 void  synth_env_init(synth_env_t *env, float sample_rate);
+void  synth_env_set_times(synth_env_t *env, float delay, float attack, float hold,
+                          float decay, float sustain, float release);
+void  synth_env_set_sample_rate(synth_env_t *env, float sample_rate);
 void  synth_env_gate_on(synth_env_t *env);
 void  synth_env_gate_off(synth_env_t *env);
 float synth_env_next(synth_env_t *env);
