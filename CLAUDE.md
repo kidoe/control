@@ -85,9 +85,12 @@ Be honest about this line; a lot of it cannot be checked from a container.
   `-Wconversion -Werror`, at three voice counts, plus the headers compiled as
   C++ and a build with parameter names stripped.
 - **Compiles but has never run**: the desktop backend. No sound card in CI.
-- **Never compiled at all**: the Android JNI bridge. There is no NDK in CI, so
-  its AAudio calls have never been checked against a real header. Treat
-  `synth_jni.c` as unproven code.
+- **Type-checks but has never run**: the Android JNI bridge. Its JNI signatures
+  match what `javac -h` generates, and `synth_jni.c` compiles clean against the
+  real `aaudio/AAudio.h` from three different NDK releases, so the function
+  names, argument types and constants are right. It has never been linked
+  against `libaaudio` or run on a device, so whether the stream actually opens
+  is still unknown.
 - **Never built**: any embedded target. "Runs on a microcontroller" is a design
   claim backed by the dependency and memory checks, not by hardware.
 
