@@ -86,7 +86,7 @@ away for convenience.
   is one comparison, and it is loop-invariant: `render_block()` decides once per
   block whether to advance each envelope and the LFO and whether to retune the
   oscillator and the filter. A patch that has not asked for modulation pays for
-  none of it, which is 43% of the render loop on a Cortex-M4F. The one thing it
+  none of it, which is 47% of the render loop. The one thing it
   costs is that an LFO nothing listens to does not free-run, so turning a depth
   up mid-note starts the wobble from where the note began rather than from a
   phase that had been advancing unheard.
@@ -108,19 +108,19 @@ Counted with callgrind, at 48 kHz in 96-frame blocks, for one second of audio:
 
 | | instructions |
 |---|---|
-| one instance, 8 notes | 57.5 M |
-| eight instances, 1 note each | 89.8 M |
-| eight instances, all silent | 37.0 M |
-| eight instances, 8 notes each (64 voices) | 459.5 M |
+| one instance, 8 notes | 50.9 M |
+| eight instances, 1 note each | 80.9 M |
+| eight instances, all silent | 34.4 M |
+| eight instances, 8 notes each (64 voices) | 406.5 M |
 
-Cost follows sounding voices, not instances: eight notes cost 52.8 M whether
+Cost follows sounding voices, not instances: eight notes cost 46.5 M whether
 they sit in one instance or in eight, once the idle floor is taken off. That
-floor is what an instance costs for existing — 4.6 M a second each, because
+floor is what an instance costs for existing — 4.3 M a second each, because
 every block scans all `SYNTH_MAX_VOICES` slots whether or not they sound. It is
-small beside a sounding voice at 6.6 M, but it is per instance and it is paid
+small beside a sounding voice at 5.8 M, but it is per instance and it is paid
 forever, so size the voice count to what one *track* needs rather than to the
 whole instrument: at `SYNTH_MAX_VOICES=2` the same eight one-note parts cost
-68.5 M instead of 89.8 M, and the idle floor drops from 37.0 M to 15.3 M.
+61.6 M instead of 80.9 M, and the idle floor drops from 34.4 M to 14.7 M.
 
 A patch is exactly the normalized parameters, so `synth_save_patch` and
 `synth_load_patch` move one track's sound around as a plain float array with no
@@ -162,8 +162,10 @@ order the units are actually wired in `synth_render()`.
   octaves, the pitch in semitones and the amplitude as a dip that can only take
   level away. All three depths ship at exactly zero, so the section changes no
   existing patch and, since nothing then listens, the LFO does not run at all.
-  Vibrato is the destination that costs most, because retuning the oscillator
-  recomputes the VOSIM pulse layout.
+  Switching on any destination costs about the same, because what dominates in
+  each case is retuning at control rate: 8 voices go from 47.6 million
+  instructions a second to 69.6 with the cutoff moving and 69.3 with the pitch
+  moving, on a Cortex-M4F.
 - **Pitch envelope**: attack and decay only, in octaves, applied to the
   oscillator's frequency at the same control-rate tick that retunes the filter.
   It is what makes percussion possible: a sine falling an octave and a half onto
@@ -171,9 +173,12 @@ order the units are actually wired in `synth_render()`.
   the sweep is a tuned beep. Negative amounts sweep up onto the note instead.
   Its amount ships centred, so it is silent in every patch that predates it, and
   the envelope is not advanced while it is. With it switched on, 8 voices go
-  from 52.7 to 81.0 million instructions a second on a Cortex-M4F: it is the
-  most expensive modulation in the library, because it forces the oscillator to
-  be retuned on every control tick and that relays out the VOSIM pulses.
+  from 47.6 to 74.2 million instructions a second on a Cortex-M4F, which is 7%
+  dearer than vibrato there because it also runs an envelope per voice per
+  sample to decide where to move the pitch to. On a Cortex-M0 that ordering
+  reverses and it is the cheapest of the three, within the 2% the modulations
+  span: once every arithmetic operation is a function call, which modulation it
+  is barely matters.
 - **Glide**: portamento, in seconds, linear in semitones so the time is the
   same whatever the interval. A note starts on the pitch of the one played
   before it and travels; the first note of a session has nothing to come from
@@ -251,8 +256,8 @@ Be honest about this line; a lot of it cannot be checked from a container.
   Cortex-M4F with `-Wconversion -Werror` and runs the dependency check on both.
   Measured at 8 voices: 9.8 KB of flash and 5.0 KB of RAM on M0+, 9.0 KB and
   5.0 KB on M4F, of which the delay line is 0.6 KB and 0.5 KB that a target
-  which does not link `src/delay.c` never pays — on an RP2040 that is 0.4% of its flash and 1.7% of its SRAM,
-  so memory is not the constraint.
+  which does not link `src/delay.c` never pays. On an RP2040 that is 0.5% of
+  its flash and 1.9% of its SRAM, so memory is not the constraint.
 
   CPU is the constraint, and it is now measured rather than guessed.
   `tools/bench-arm/run.sh` renders a second of audio on QEMU's Cortex-M0 and
@@ -264,13 +269,18 @@ Be honest about this line; a lot of it cannot be checked from a container.
   | sine, 1 voice | 9.3 M | 153 M |
   | sine, 8 voices | 47.6 M | 1122 M |
   | saw, 8 voices | 47.2 M | 896 M |
+  | sine, 8 voices + filter LFO | 69.6 M | 1855 M |
+  | sine, 8 voices + vibrato | 69.3 M | 1869 M |
   | sine, 8 voices + pitch sweep | 74.2 M | 1847 M |
 
   Read these as a floor. QEMU counts instructions retired, not cycles, and
   models neither flash wait states nor the multi-cycle loads and taken branches
-  a real Cortex-M pays; silicon is worse than this, never better. The M4F
-  figures land within a per cent of what callgrind counts for the same C on
-  x86, which is the cross-check that they are counting the right thing.
+  a real Cortex-M pays; silicon is worse than this, never better. Counting the
+  same workload with callgrind on x86 lands within about 10% either way — 5%
+  under for a sine, 8% over for a saw — which is what two instruction sets doing
+  the same arithmetic should look like, and is the cross-check that the plugin
+  counts the right thing. It is not close enough to treat one as a stand-in for
+  the other.
 
   What they say:
 
