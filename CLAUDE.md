@@ -55,6 +55,37 @@ away for convenience.
   a descriptor table, so a MIDI CC, an ADC reading and a UI slider all map onto
   them the same way.
 
+## Several parts at once
+
+A groovebox wants a patch and a voice pool per track. That is several `synth_t`,
+not a channel argument: the engine has no mutable global state at all — the only
+global is the const parameter table, and all three translation units have an
+empty `.bss` — so instances are independent by construction. Each carries its
+own parameters, voices and event queue, and the host sums their outputs.
+
+Measured at 48 kHz in 96-frame blocks, eight voices sounding:
+
+| | cost |
+|---|---|
+| one instance, 8 notes | 0.74% of a core |
+| eight instances, 1 note each | 0.80% |
+| eight instances, all silent | 0.12% |
+| eight instances, 8 notes each (64 voices) | 6.66% |
+
+So cost follows sounding voices, not instances, and the floor for holding idle
+parts is small. What does cost something is that every block scans all
+`SYNTH_MAX_VOICES` slots per instance whether or not they sound: dropping it
+from 8 to 2 takes eight one-note parts from 0.80% to 0.67%. Size it to what one
+*track* needs, not the whole instrument.
+
+Two things the host owns:
+
+- **Headroom.** Each instance is bounded by 1 on its own, so four parts in
+  unison reach four. Nothing in the library can pick that budget.
+- **The clock.** `synth_frame_time()` is per instance and starts at zero, so a
+  part created mid-session does not share the frame numbers the others are
+  already using. Create every part up front, or the sequencer has to offset.
+
 ## Signal path
 
 Oscillator, then filter, then amplifier — the classic arrangement, and the
@@ -80,7 +111,7 @@ cmake --build build
 cd build && ctest --output-on-failure
 ```
 
-65 test functions, 169 assertions, no audio hardware needed. Spectra are
+71 test functions, 188 assertions, no audio hardware needed. Spectra are
 measured with a Goertzel probe at exact frequencies rather than asserted on the
 shape of the code, so the tests survive refactoring and catch real regressions.
 
