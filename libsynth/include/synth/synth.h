@@ -85,7 +85,8 @@ typedef struct {
     float params[SYNTH_PARAM_COUNT]; /* normalized, [0, 1] */
     synth_voice_t voices[SYNTH_MAX_VOICES];
     unsigned age_counter;
-    int mod_counter; /* paces filter retuning, see SYNTH_MOD_INTERVAL */
+    int mod_counter;    /* paces filter retuning, see SYNTH_MOD_INTERVAL */
+    float pitch_bend;   /* semitones, applied on top of every note */
 } synth_t;
 
 /* Lifecycle */
@@ -98,6 +99,10 @@ void synth_set_sample_rate(synth_t *s, float sample_rate);
 
 /* Audio. Writes n_frames of mono samples, overwriting `out`. Real-time safe. */
 void synth_render(synth_t *s, float *out, int n_frames);
+
+/* Bends every sounding voice, and every voice started afterwards, by this many
+   semitones. Fractional and signed; 0 is no bend. */
+void synth_set_pitch_bend(synth_t *s, float semitones);
 
 /* Notes. velocity is [0, 1]; note is a MIDI note number. */
 void synth_note_on(synth_t *s, int note, float velocity);

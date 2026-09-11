@@ -1,4 +1,5 @@
 #include "synth/synth.h"
+#include "synth/midi.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -1197,6 +1198,242 @@ static void test_envelope_stages(void)
     CHECK_NEAR(env.level, 0.0f, 1e-6f);
 }
 
+/* Feeds a byte string and returns how many messages came out. */
+static int feed_bytes(synth_midi_t *midi, synth_t *s, const unsigned char *bytes, int n)
+{
+    int emitted = 0;
+    int i;
+
+    for (i = 0; i < n; ++i) {
+        emitted += synth_midi_feed(midi, s, bytes[i]);
+    }
+    return emitted;
+}
+
+static void test_midi_notes(void)
+{
+    static const unsigned char on[] = { 0x90, 60, 100 };
+    static const unsigned char off[] = { 0x80, 60, 0 };
+    synth_midi_t midi;
+    synth_t s;
+    float buf[64];
+
+    synth_midi_init(&midi);
+    synth_init(&s, SR);
+
+    CHECK(feed_bytes(&midi, &s, on, 3) == 1);
+    CHECK(synth_active_voices(&s) == 1);
+    synth_render(&s, buf, 64);
+
+    CHECK(feed_bytes(&midi, &s, off, 3) == 1);
+    render_seconds(&s, buf, 64, 1.5f);
+    CHECK(synth_active_voices(&s) == 0);
+}
+
+static void test_midi_note_on_at_zero_velocity_is_a_note_off(void)
+{
+    static const unsigned char stream[] = { 0x90, 64, 100, 0x90, 64, 0 };
+    synth_midi_t midi;
+    synth_t s;
+    float buf[64];
+
+    /* Keyboards send note off this way so a whole phrase can ride one status
+       byte, so the parser has to treat it as a note off, not a silent note. */
+    synth_midi_init(&midi);
+    synth_init(&s, SR);
+    CHECK(feed_bytes(&midi, &s, stream, 6) == 2);
+    render_seconds(&s, buf, 64, 1.5f);
+    CHECK(synth_active_voices(&s) == 0);
+}
+
+static void test_midi_running_status(void)
+{
+    static const unsigned char stream[] = { 0x90, 60, 100, 64, 100, 67, 100 };
+    synth_midi_t midi;
+    synth_t s;
+    float buf[64];
+
+    /* One status byte followed by three note pairs. */
+    synth_midi_init(&midi);
+    synth_init(&s, SR);
+    CHECK(feed_bytes(&midi, &s, stream, 7) == 3);
+    synth_render(&s, buf, 64);
+    CHECK(synth_active_voices(&s) == 3);
+}
+
+static void test_midi_realtime_bytes_do_not_break_a_message(void)
+{
+    static const unsigned char stream[] = { 0x90, 0xF8, 60, 0xFE, 100, 0xF8, 64, 100 };
+    synth_midi_t midi;
+    synth_t s;
+    float buf[64];
+
+    /* Clock and active-sensing bytes are allowed to land between the bytes of
+       another message, and must leave the parse and running status untouched. */
+    synth_midi_init(&midi);
+    synth_init(&s, SR);
+    CHECK(feed_bytes(&midi, &s, stream, 8) == 2);
+    synth_render(&s, buf, 64);
+    CHECK(synth_active_voices(&s) == 2);
+}
+
+static void test_midi_sysex_is_skipped_and_cancels_running_status(void)
+{
+    static const unsigned char stream[] = {
+        0x90, 60, 100,              /* a note, establishing running status */
+        0xF0, 0x7D, 1, 2, 3, 0xF7,  /* sysex, which must produce nothing */
+        62, 100                     /* orphan data: running status is gone */
+    };
+    synth_midi_t midi;
+    synth_t s;
+    float buf[64];
+
+    synth_midi_init(&midi);
+    synth_init(&s, SR);
+    CHECK(feed_bytes(&midi, &s, stream, 11) == 1);
+    synth_render(&s, buf, 64);
+    CHECK(synth_active_voices(&s) == 1);
+}
+
+static void test_midi_ignores_orphan_data_and_unhandled_types(void)
+{
+    static const unsigned char orphans[] = { 60, 100, 40 };
+    static const unsigned char program[] = { 0xC0, 5 };
+    static const unsigned char aftertouch[] = { 0xD0, 64 };
+    synth_midi_t midi;
+    synth_t s;
+
+    synth_midi_init(&midi);
+    synth_init(&s, SR);
+    CHECK(feed_bytes(&midi, &s, orphans, 3) == 0);
+    CHECK(feed_bytes(&midi, &s, program, 2) == 0);
+    CHECK(feed_bytes(&midi, &s, aftertouch, 2) == 0);
+    CHECK(synth_active_voices(&s) == 0);
+}
+
+static void test_midi_control_change_moves_a_parameter(void)
+{
+    synth_midi_t midi;
+    synth_t s;
+    unsigned char cc[3];
+
+    synth_midi_init(&midi);
+    synth_init(&s, SR);
+
+    /* The default map puts the parameters on controllers from 20 upwards. */
+    cc[0] = 0xB0;
+    cc[1] = (unsigned char)(20 + SYNTH_PARAM_MASTER_GAIN);
+    cc[2] = 127;
+    CHECK(feed_bytes(&midi, &s, cc, 3) == 1);
+    CHECK_NEAR(synth_get_param(&s, SYNTH_PARAM_MASTER_GAIN), 1.0f, 1e-6f);
+
+    cc[2] = 0;
+    feed_bytes(&midi, &s, cc, 3);
+    CHECK_NEAR(synth_get_param(&s, SYNTH_PARAM_MASTER_GAIN), 0.0f, 1e-6f);
+
+    /* Remapping moves the parameter a controller drives. */
+    synth_midi_clear_map(&midi);
+    synth_midi_map_cc(&midi, 7, SYNTH_PARAM_FILTER_Q);
+    cc[1] = 7;
+    cc[2] = 127;
+    feed_bytes(&midi, &s, cc, 3);
+    CHECK_NEAR(synth_get_param(&s, SYNTH_PARAM_FILTER_Q), 1.0f, 1e-6f);
+
+    /* An unmapped controller must do nothing at all. */
+    cc[1] = 9;
+    cc[2] = 127;
+    feed_bytes(&midi, &s, cc, 3);
+    CHECK_NEAR(synth_get_param(&s, SYNTH_PARAM_MASTER_GAIN), 0.0f, 1e-6f);
+}
+
+static void test_midi_all_notes_off_works_whatever_the_map(void)
+{
+    static const unsigned char notes[] = { 0x90, 60, 100, 64, 100 };
+    static const unsigned char panic[] = { 0xB0, 123, 0 };
+    synth_midi_t midi;
+    synth_t s;
+    float buf[64];
+
+    synth_midi_init(&midi);
+    synth_midi_clear_map(&midi);
+    synth_init(&s, SR);
+    feed_bytes(&midi, &s, notes, 5);
+    synth_render(&s, buf, 64);
+    CHECK(synth_active_voices(&s) == 2);
+
+    feed_bytes(&midi, &s, panic, 3);
+    render_seconds(&s, buf, 64, 1.5f);
+    CHECK(synth_active_voices(&s) == 0);
+}
+
+/* Frequency of a single sounding voice, by counting zero crossings. */
+static float voice_frequency(synth_t *s, float seconds)
+{
+    static float buf[4096];
+    int total = (int)(SR * seconds);
+    int crossings = 0;
+    float prev = 0.0f;
+    int done = 0;
+
+    while (done < total) {
+        int n = (total - done > 4096) ? 4096 : total - done;
+        int i;
+
+        synth_render(s, buf, n);
+        for (i = 0; i < n; ++i) {
+            if (prev <= 0.0f && buf[i] > 0.0f) {
+                ++crossings;
+            }
+            prev = buf[i];
+        }
+        done += n;
+    }
+    return (float)crossings / seconds;
+}
+
+static void test_midi_pitch_bend(void)
+{
+    static const unsigned char note[] = { 0x90, 69, 100 };  /* A4, 440 Hz */
+    static const unsigned char up[] = { 0xE0, 0x00, 0x7F }; /* full bend up */
+    static const unsigned char centre[] = { 0xE0, 0x00, 0x40 };
+    synth_midi_t midi;
+    synth_t s;
+    float plain, bent, restored;
+
+    synth_midi_init(&midi);
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_CUTOFF, 1.0f);
+    feed_bytes(&midi, &s, note, 3);
+    plain = voice_frequency(&s, 0.5f);
+    CHECK_NEAR(plain, 440.0f, 3.0f);
+
+    /* The default range is two semitones, so a full bend reaches B4. */
+    CHECK(feed_bytes(&midi, &s, up, 3) == 1);
+    bent = voice_frequency(&s, 0.5f);
+    CHECK_NEAR(bent, 493.88f, 5.0f);
+
+    feed_bytes(&midi, &s, centre, 3);
+    restored = voice_frequency(&s, 0.5f);
+    CHECK_NEAR(restored, 440.0f, 3.0f);
+}
+
+static void test_pitch_bend_applies_to_later_notes(void)
+{
+    synth_t s;
+    float held;
+
+    /* A bend already in force has to reach notes started after it, or a new
+       note in the middle of a bend would jump back to concert pitch. */
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_CUTOFF, 1.0f);
+    synth_set_pitch_bend(&s, 12.0f);
+    synth_note_on(&s, 57, 1.0f); /* A3 bent an octave up is A4 */
+    held = voice_frequency(&s, 0.5f);
+    CHECK_NEAR(held, 440.0f, 3.0f);
+}
+
 int main(void)
 {
     test_note_to_hz();
@@ -1246,6 +1483,16 @@ int main(void)
     test_render_is_deterministic();
     test_param_mapping();
     test_gain_scales_output();
+    test_midi_notes();
+    test_midi_note_on_at_zero_velocity_is_a_note_off();
+    test_midi_running_status();
+    test_midi_realtime_bytes_do_not_break_a_message();
+    test_midi_sysex_is_skipped_and_cancels_running_status();
+    test_midi_ignores_orphan_data_and_unhandled_types();
+    test_midi_control_change_moves_a_parameter();
+    test_midi_all_notes_off_works_whatever_the_map();
+    test_midi_pitch_bend();
+    test_pitch_bend_applies_to_later_notes();
 
     if (g_failures == 0) {
         printf("all tests passed\n");

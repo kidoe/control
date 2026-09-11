@@ -149,6 +149,7 @@ void synth_init(synth_t *s, float sample_rate)
 
     s->sample_rate = (sample_rate > 0.0f) ? sample_rate : 44100.0f;
     s->age_counter = 0;
+    s->pitch_bend = 0.0f;
 
     for (i = 0; i < SYNTH_PARAM_COUNT; ++i) {
         s->params[i] = k_param_info[i].default_norm;
@@ -220,6 +221,23 @@ void synth_set_sample_rate(synth_t *s, float sample_rate)
     synth_reset(s);
 }
 
+void synth_set_pitch_bend(synth_t *s, float semitones)
+{
+    int i;
+
+    s->pitch_bend = semitones;
+
+    for (i = 0; i < SYNTH_MAX_VOICES; ++i) {
+        synth_voice_t *v = &s->voices[i];
+
+        /* Voices in their release are still sounding and still belong to the
+           note that was played, so they bend too. */
+        if (synth_env_is_active(&v->amp_env)) {
+            synth_osc_set_freq(&v->osc, synth_note_to_hz((float)v->note + semitones));
+        }
+    }
+}
+
 static synth_voice_t *allocate_voice(synth_t *s, int note)
 {
     synth_voice_t *oldest = &s->voices[0];
@@ -252,7 +270,7 @@ void synth_note_on(synth_t *s, int note, float velocity)
     v->age = ++s->age_counter;
 
     synth_osc_reset(&v->osc);
-    synth_osc_set_freq(&v->osc, synth_note_to_hz((float)note));
+    synth_osc_set_freq(&v->osc, synth_note_to_hz((float)note + s->pitch_bend));
     synth_filter_reset(&v->filter); /* a stolen voice must not ring on into the new note */
     voice_apply_osc(s, v);
     voice_apply_amp(s, v);

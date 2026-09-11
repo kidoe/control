@@ -11,6 +11,7 @@ set(SYNTH_MAX_VOICES "8" CACHE STRING "Maximum polyphony, fixed at compile time"
 
 add_library(synth STATIC
     src/dsp.c
+    src/midi.c
     src/synth.c
 )
 
