@@ -198,6 +198,17 @@ JNIEXPORT void JNICALL Java_com_kidoe_synth_SynthEngine_allNotesOff(JNIEnv *env,
     enqueue(SYNTH_EVENT_ALL_NOTES_OFF, 0, 0, 0.0f);
 }
 
+JNIEXPORT jint JNICALL Java_com_kidoe_synth_SynthEngine_activeVoices(JNIEnv *env, jclass clazz)
+{
+    (void)env;
+    (void)clazz;
+
+    /* Reads voice state the audio thread owns. Nothing here can tear a value
+       that matters: the worst case is a count taken across a block boundary,
+       which is what a meter is anyway. */
+    return (jint)synth_active_voices(&g_synth);
+}
+
 JNIEXPORT void JNICALL Java_com_kidoe_synth_SynthEngine_setParam(JNIEnv *env, jclass clazz,
                                                                  jint param, jfloat norm)
 {

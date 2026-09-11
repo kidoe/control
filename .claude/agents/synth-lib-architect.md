@@ -20,24 +20,30 @@ plugin) without redesigning the core.
 `libsynth/` is the library. A voice is oscillator, then filter, then amplifier:
 
 - **Oscillator** (`src/dsp.c`): sine, PolyBLEP saw and square, Casio-style phase
-  distortion, VOSIM pulse trains, and a wave-terrain orbit. Every waveform is a
-  pure function of the phase.
+  distortion, VOSIM pulse trains, a wave-terrain orbit, and interpolated noise.
+  Every waveform but noise is a pure function of the phase.
 - **Filter**: a topology-preserving state-variable filter, low/high/band-pass,
   with its own DAHDSR envelope and keyboard tracking, retuned at control rate.
+- **Modulation**: an LFO per voice reaching cutoff, pitch and amplitude, and an
+  attack-decay pitch envelope in octaves, which is what makes percussion
+  possible. Both ship at a neutral depth so they change no existing patch.
 - **Amplifier**: per-note level with velocity sensitivity and soft saturation.
-- **Engine** (`src/synth.c`): compile-time polyphony with voice stealing, and a
-  flat table of normalized parameters carrying range, curve and name.
+- **Engine** (`src/synth.c`): compile-time polyphony with voice stealing, a flat
+  table of normalized parameters carrying range, curve and name, and a lock-free
+  queue of frame-stamped events so a sequencer thread can drive it safely.
+- **MIDI** (`src/midi.c`): a byte parser in its own translation unit, so a
+  target that does not want it never links it.
 - **Backends** (`backends/`): miniaudio on desktop, AAudio through JNI on
-  Android, plus a dependency-free offline WAV renderer in `examples/`.
+  Android, an RP2040 example for bare metal, plus a dependency-free offline WAV
+  renderer in `examples/`.
 - **Tests** (`tests/test_synth.c`): a host suite needing no audio hardware,
   which measures spectra with a Goertzel probe rather than asserting on shapes.
 
 This grew out of a JSyn prototype (Java/Processing, PC-only, MIDI CC driven)
 that has since been removed from the working tree; `git log --diff-filter=D --
-Control/` finds it if you ever need the original as a reference. Its remaining
-unbuilt ideas are per-oscillator envelopes and LFO modulation of pitch,
-amplitude and cutoff. There is still no MIDI anywhere in the library, and no
-embedded target has ever been built or run on real hardware.
+Control/` finds it if you ever need the original as a reference. No embedded
+target has ever been run on real hardware, and the CPU cost on a core without an
+FPU has never been measured.
 
 ## Architecture rules (non-negotiable defaults, revisit if the user overrides)
 

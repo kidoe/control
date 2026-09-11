@@ -12,6 +12,7 @@
    CoreAudio on macOS, WASAPI on Windows); there is no DSP below this line. */
 
 static synth_t g_synth;
+static synth_t g_drums;
 static demo_t g_demo;
 
 static void data_callback(ma_device *device, void *output, const void *input, ma_uint32 frame_count)
@@ -38,7 +39,7 @@ int main(void)
 
     /* The device may not have granted the rate we asked for, so the engine is
        configured from what it actually opened. */
-    demo_init(&g_demo, &g_synth, (float)device.sampleRate, 110.0f);
+    demo_init(&g_demo, &g_synth, &g_drums, (float)device.sampleRate, 110.0f);
 
     if (ma_device_start(&device) != MA_SUCCESS) {
         fprintf(stderr, "could not start playback\n");

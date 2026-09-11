@@ -796,6 +796,107 @@ static void test_new_waves_reach_the_engine(void)
     CHECK(peak(buf, 4096) > 0.05f);
 }
 
+/* Loudest thing below the fundamental. A band-limited periodic waveform has
+   nothing there at all, so whatever turns up is aliasing folded down, measured
+   against a sine whose only content is its own fundamental. */
+#define SPECTRUM_FRAMES 16384
+
+static float subharmonic_floor(synth_wave_t wave, float f0, float knee)
+{
+    static float buf[SPECTRUM_FRAMES];
+    synth_osc_t osc;
+    float worst = 0.0f;
+    float hz;
+    int i;
+
+    synth_osc_init(&osc, SR);
+    osc.wave = wave;
+    synth_osc_set_pd_knee(&osc, knee);
+    synth_osc_set_vosim(&osc, 3000.0f, 3, 0.7f);
+    synth_osc_set_terrain(&osc, 0.9f, 3);
+    synth_osc_set_freq(&osc, f0);
+    for (i = 0; i < SPECTRUM_FRAMES; ++i) {
+        buf[i] = synth_osc_next(&osc);
+    }
+
+    /* A long window matters: the probe's own leakage falls from 0.015 of the
+       fundamental at 4096 samples to 0.003 at 16384, and a floor that high
+       would hide the aliasing this is looking for. */
+    for (hz = 120.0f; hz < f0 - 150.0f; hz += 60.0f) {
+        float m = goertzel(buf, SPECTRUM_FRAMES, hz);
+
+        if (m > worst) {
+            worst = m;
+        }
+    }
+    return worst / goertzel(buf, SPECTRUM_FRAMES, f0);
+}
+
+static void test_no_waveform_aliases_below_its_fundamental(void)
+{
+    static const synth_wave_t periodic[] = {
+        SYNTH_WAVE_SINE, SYNTH_WAVE_SAW, SYNTH_WAVE_SQUARE,
+        SYNTH_WAVE_VOSIM, SYNTH_WAVE_TERRAIN
+    };
+    float sine_floor = subharmonic_floor(SYNTH_WAVE_SINE, 1500.0f, 0.5f);
+    int i;
+
+    /* The sine cannot alias, so whatever it measures is the probe's own floor
+       and nothing else may sit far above it. Noise is left out: it is broadband
+       on purpose and has no harmonic series to be below. */
+    CHECK(sine_floor < 0.005f);
+
+    for (i = 0; i < (int)(sizeof(periodic) / sizeof(periodic[0])); ++i) {
+        CHECK(subharmonic_floor(periodic[i], 1500.0f, 0.5f) < sine_floor * 3.0f);
+        CHECK(subharmonic_floor(periodic[i], 3000.0f, 0.5f) < sine_floor * 3.0f);
+    }
+}
+
+static void test_phase_distortion_stays_band_limited_up_high(void)
+{
+    float sine_floor = subharmonic_floor(SYNTH_WAVE_SINE, 1500.0f, 0.5f);
+
+    /* The tightest knee is exactly where this used to fall apart: the fast
+       segment crossed half a sine in under two samples, which no amount of
+       correction at the corner could represent. The knee is widened with pitch
+       instead, so the tone dulls rather than folding. */
+    CHECK(subharmonic_floor(SYNTH_WAVE_PD, 440.0f, 0.02f) < sine_floor * 3.0f);
+    CHECK(subharmonic_floor(SYNTH_WAVE_PD, 1500.0f, 0.02f) < sine_floor * 3.0f);
+    CHECK(subharmonic_floor(SYNTH_WAVE_PD, 3000.0f, 0.02f) < sine_floor * 3.0f);
+}
+
+static void test_phase_distortion_still_bends_at_playable_pitches(void)
+{
+    static float bent[ALIAS_FRAMES];
+    static float plain[ALIAS_FRAMES];
+    synth_osc_t osc;
+    int i;
+
+    /* Widening the knee must not flatten the effect where it matters: at a bass
+       note there is room for the tight knee the host asked for. */
+    synth_osc_init(&osc, SR);
+    osc.wave = SYNTH_WAVE_PD;
+    synth_osc_set_pd_knee(&osc, 0.05f);
+    synth_osc_set_freq(&osc, 110.0f);
+    CHECK_NEAR(osc.pd_knee, 0.05f, 1e-6f);
+    for (i = 0; i < ALIAS_FRAMES; ++i) {
+        bent[i] = synth_osc_next(&osc);
+    }
+
+    /* Against the same oscillator at a neutral knee, which is a plain sine, so
+       the comparison is the effect itself rather than the probe's leakage. */
+    synth_osc_init(&osc, SR);
+    osc.wave = SYNTH_WAVE_PD;
+    synth_osc_set_pd_knee(&osc, 0.5f);
+    synth_osc_set_freq(&osc, 110.0f);
+    for (i = 0; i < ALIAS_FRAMES; ++i) {
+        plain[i] = synth_osc_next(&osc);
+    }
+
+    CHECK(goertzel(bent, ALIAS_FRAMES, 880.0f) >
+          goertzel(plain, ALIAS_FRAMES, 880.0f) * 5.0f);
+}
+
 static void test_oscillator_frequency(void)
 {
     synth_osc_t osc;
@@ -1714,6 +1815,33 @@ static void test_instances_keep_their_clocks_in_step(void)
     }
 }
 
+static void test_a_late_instance_can_join_the_timeline(void)
+{
+    synth_t running, added;
+    static float buf[512];
+    synth_event_t ev;
+
+    /* A part created mid-session starts at frame zero, so without this it would
+       be numbering frames its neighbours passed long ago. */
+    synth_init(&running, SR);
+    synth_render(&running, buf, 4096);
+
+    synth_init(&added, SR);
+    synth_set_frame_time(&added, synth_frame_time(&running));
+    CHECK(synth_frame_time(&added) == synth_frame_time(&running));
+
+    /* And an event placed on the shared timeline now lands where it should
+       rather than arriving four thousand frames late. */
+    ev.frame = synth_frame_time(&added) + 200;
+    ev.type = SYNTH_EVENT_NOTE_ON;
+    ev.index = 60;
+    ev.value = 1.0f;
+    CHECK(synth_schedule(&added, &ev) == 1);
+    synth_set_param(&added, SYNTH_PARAM_OSC_WAVE, 1.0f / (float)(SYNTH_WAVE_COUNT - 1));
+    synth_render(&added, buf, 512);
+    CHECK(first_onset(buf, 512) >= 200 && first_onset(buf, 512) <= 202);
+}
+
 static void test_a_new_instance_starts_its_clock_at_zero(void)
 {
     synth_t running, added;
@@ -2215,10 +2343,230 @@ static void test_lfo_retriggers_with_the_note(void)
     CHECK(s.voices[0].lfo_value == 0.0f);
 }
 
+/* Frequency the engine is actually sounding, counted from its output rather
+   than read out of the voice: upward zero crossings over the window. Only
+   meaningful for a waveform that crosses zero twice a cycle, so the tests below
+   leave the oscillator on its default sine. */
+static float rendered_hz(synth_t *s, float *buf, int cap, float seconds)
+{
+    int total = (int)(SR * seconds);
+    int crossings = 0;
+    float prev = 0.0f;
+    int done = 0;
+
+    while (done < total) {
+        int n = (total - done < cap) ? (total - done) : cap;
+        int i;
+
+        synth_render(s, buf, n);
+        for (i = 0; i < n; ++i) {
+            if (prev <= 0.0f && buf[i] > 0.0f) {
+                ++crossings;
+            }
+            prev = buf[i];
+        }
+        done += n;
+    }
+    return (float)crossings / seconds;
+}
+
+/* A kick is a fast sweep downwards onto the note, so the note has to start high
+   and settle. Measured in the audio, because that is the part a listener
+   hears. */
+static void test_pitch_env_sweeps_the_note_down(void)
+{
+    synth_t s;
+    static float buf[512];
+    float at_start, at_end;
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_AMOUNT, 0.75f); /* +2 octaves */
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_ATTACK, 0.0f);  /* instant */
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_DECAY, 0.63f);  /* about a second */
+    synth_note_on(&s, 48, 1.0f); /* 130.8 Hz */
+
+    at_start = rendered_hz(&s, buf, 512, 0.05f);
+    render_seconds(&s, buf, 512, 1.5f);
+    at_end = rendered_hz(&s, buf, 512, 0.2f);
+
+    /* Four times up at the peak, decaying through the first window, so the
+       measured start lands somewhere near three times the note. */
+    CHECK(at_start > at_end * 2.5f);
+    CHECK_NEAR(at_end, 130.8f, 6.0f);
+}
+
+/* Negative amount is the siren, sweeping up onto the note instead. */
+static void test_pitch_env_amount_is_bipolar(void)
+{
+    synth_t s;
+    static float buf[512];
+    float at_start, at_end;
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_AMOUNT, 0.25f); /* -2 octaves */
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_ATTACK, 0.0f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_DECAY, 0.63f);
+    synth_note_on(&s, 60, 1.0f); /* 261.6 Hz */
+
+    at_start = rendered_hz(&s, buf, 512, 0.05f);
+    render_seconds(&s, buf, 512, 1.5f);
+    at_end = rendered_hz(&s, buf, 512, 0.2f);
+
+    CHECK(at_end > at_start * 2.5f);
+    CHECK_NEAR(at_end, 261.6f, 8.0f);
+}
+
+/* The decay is what separates a drum from a siren, so it has to be the control
+   that decides how long the sweep lasts. */
+static void test_pitch_env_decay_sets_the_sweep_length(void)
+{
+    synth_t s;
+    static float buf[512];
+    float quick, slow;
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_AMOUNT, 0.75f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_ATTACK, 0.0f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_DECAY, 0.29f); /* about 100 ms */
+    synth_note_on(&s, 48, 1.0f);
+    render_seconds(&s, buf, 512, 0.15f);
+    quick = rendered_hz(&s, buf, 512, 0.1f);
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_AMOUNT, 0.75f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_ATTACK, 0.0f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_DECAY, 0.79f); /* about two seconds */
+    synth_note_on(&s, 48, 1.0f);
+    render_seconds(&s, buf, 512, 0.15f);
+    slow = rendered_hz(&s, buf, 512, 0.1f);
+
+    /* At the same moment the quick one is already home and the slow one has
+       barely moved. */
+    CHECK_NEAR(quick, 130.8f, 8.0f);
+    CHECK(slow > quick * 2.0f);
+}
+
+/* Compatibility: the section has to be silent in every patch written before it
+   existed, which means its default amount is exactly no sweep. */
+static void test_pitch_env_defaults_change_nothing(void)
+{
+    synth_t s;
+    static float buf[512];
+
+    CHECK_NEAR(synth_param_denorm(SYNTH_PARAM_PITCH_ENV_AMOUNT,
+                                  synth_param_info(SYNTH_PARAM_PITCH_ENV_AMOUNT)->default_norm),
+               0.0f, 1e-6f);
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_note_on(&s, 69, 1.0f);
+    CHECK_NEAR(rendered_hz(&s, buf, 512, 0.2f), 440.0f, 8.0f);
+    CHECK_NEAR(rendered_hz(&s, buf, 512, 0.2f), 440.0f, 8.0f);
+}
+
+/* The new parameters have to sit past every old one, because a host stores a
+   patch as the positional array synth_save_patch() writes and an index that
+   moved would reinterpret every saved sound in silence. */
+static void test_new_parameters_are_appended(void)
+{
+    CHECK(SYNTH_PARAM_PITCH_ENV_AMOUNT == SYNTH_PARAM_LFO_TO_AMP + 1);
+    CHECK(SYNTH_PARAM_PITCH_ENV_DECAY == SYNTH_PARAM_COUNT - 1);
+    /* The indices this library has published, spelled out so that moving one
+       fails here rather than at a host that already has patches on disk. */
+    CHECK(SYNTH_PARAM_MASTER_GAIN == 0);
+    CHECK(SYNTH_PARAM_FILTER_ENV_AMOUNT == 17);
+    CHECK(SYNTH_PARAM_AMP_VELOCITY == 24);
+    CHECK(SYNTH_PARAM_LFO_TO_AMP == 29);
+}
+
+/* A patch from a build with fewer parameters. Filling what it does not carry
+   with zeros would put the new bipolar amount at its negative extreme, so the
+   short load fills from the defaults instead and the old sound comes back
+   unchanged. */
+static void test_a_short_patch_loads_at_its_defaults(void)
+{
+    synth_t s;
+    static float buf[512];
+    float patch[SYNTH_PARAM_COUNT];
+    int older = SYNTH_PARAM_COUNT - 3;
+    int i;
+
+    synth_init(&s, SR);
+    synth_save_patch(&s, patch);
+    for (i = older; i < SYNTH_PARAM_COUNT; ++i) {
+        patch[i] = 0.0f; /* what a zero-filled buffer would hand the loader */
+    }
+
+    synth_load_patch_n(&s, patch, older);
+    CHECK_NEAR(synth_get_param(&s, SYNTH_PARAM_PITCH_ENV_AMOUNT), 0.5f, 1e-6f);
+
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_note_on(&s, 69, 1.0f);
+    CHECK_NEAR(rendered_hz(&s, buf, 512, 0.2f), 440.0f, 8.0f);
+
+    /* And the same array loaded whole really is the broken case, so the test
+       above is measuring something. */
+    synth_load_patch(&s, patch);
+    CHECK(synth_get_param(&s, SYNTH_PARAM_PITCH_ENV_AMOUNT) < 0.5f);
+}
+
+/* Striking the same note again reuses its voice, so the sweep has to start over
+   rather than carry on from wherever the last one had fallen to. */
+static void test_pitch_env_restarts_on_a_retrigger(void)
+{
+    synth_t s;
+    static float buf[512];
+    float first, again;
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_AMOUNT, 0.75f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_ATTACK, 0.0f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_DECAY, 0.63f);
+
+    synth_note_on(&s, 48, 1.0f);
+    first = rendered_hz(&s, buf, 512, 0.05f);
+    render_seconds(&s, buf, 512, 1.5f); /* sweep long over */
+
+    synth_note_on(&s, 48, 1.0f);
+    again = rendered_hz(&s, buf, 512, 0.05f);
+
+    CHECK_NEAR(again, first, first * 0.1f);
+    CHECK(again > 300.0f);
+}
+
+/* Turning the amount back to neutral while a note sounds has to put that note
+   back in tune. The render loop stops retuning the oscillator once nothing
+   modulates the pitch, so a control that is centred mid-sweep is the one moment
+   a stale offset could stick. */
+static void test_centring_the_amount_puts_the_note_back(void)
+{
+    synth_t s;
+    static float buf[512];
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_AMOUNT, 0.75f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_ATTACK, 0.0f);
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_DECAY, 0.79f); /* still high up */
+    synth_note_on(&s, 69, 1.0f);
+    render_seconds(&s, buf, 512, 0.05f);
+
+    synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_AMOUNT, 0.5f);
+    CHECK_NEAR(rendered_hz(&s, buf, 512, 0.2f), 440.0f, 8.0f);
+}
+
 int main(void)
 {
     test_note_to_hz();
     test_sine_accuracy();
+    test_no_waveform_aliases_below_its_fundamental();
+    test_phase_distortion_stays_band_limited_up_high();
+    test_phase_distortion_still_bends_at_playable_pitches();
     test_oscillator_frequency();
     test_polyblep_reduces_saw_aliasing();
     test_polyblep_reduces_square_aliasing();
@@ -2286,6 +2634,7 @@ int main(void)
     test_instances_do_not_share_voices();
     test_instances_keep_their_clocks_in_step();
     test_a_new_instance_starts_its_clock_at_zero();
+    test_a_late_instance_can_join_the_timeline();
     test_instances_do_not_share_scheduled_events();
     test_summed_instances_need_host_headroom();
     test_lfo_rate_is_in_hertz();
@@ -2303,6 +2652,14 @@ int main(void)
     test_patch_round_trips();
     test_patch_load_clamps_and_survives_rubbish();
     test_patches_keep_instances_apart();
+    test_pitch_env_sweeps_the_note_down();
+    test_pitch_env_amount_is_bipolar();
+    test_pitch_env_decay_sets_the_sweep_length();
+    test_pitch_env_defaults_change_nothing();
+    test_new_parameters_are_appended();
+    test_a_short_patch_loads_at_its_defaults();
+    test_pitch_env_restarts_on_a_retrigger();
+    test_centring_the_amount_puts_the_note_back();
 
     if (g_failures == 0) {
         printf("all tests passed\n");

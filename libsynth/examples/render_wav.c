@@ -51,6 +51,7 @@ int main(int argc, char **argv)
     unsigned written = 0;
     int clipped = 0;
     synth_t synth;
+    synth_t drums;
     demo_t demo;
     float block[BLOCK];
     FILE *f = fopen(path, "wb");
@@ -61,7 +62,7 @@ int main(int argc, char **argv)
     }
 
     write_wav_header(f, total_frames, SAMPLE_RATE);
-    demo_init(&demo, &synth, (float)SAMPLE_RATE, 110.0f);
+    demo_init(&demo, &synth, &drums, (float)SAMPLE_RATE, 110.0f);
 
     while (written < total_frames) {
         unsigned remaining = total_frames - written;
