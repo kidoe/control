@@ -1,0 +1,24 @@
+MEMORY {
+    FLASH (rx)  : ORIGIN = FLASH_ORIGIN, LENGTH = FLASH_LEN
+    RAM   (rwx) : ORIGIN = RAM_ORIGIN,   LENGTH = RAM_LEN
+}
+ENTRY(g_vectors)
+SECTIONS {
+    .text : {
+        KEEP(*(.vectors))
+        *(.text*) *(.rodata*)
+        . = ALIGN(4);
+    } > FLASH
+    _sidata = LOADADDR(.data);
+    .data : {
+        . = ALIGN(4); _sdata = .;
+        *(.data*)
+        . = ALIGN(4); _edata = .;
+    } > RAM AT > FLASH
+    .bss : {
+        . = ALIGN(4); _sbss = .;
+        *(.bss*) *(COMMON)
+        . = ALIGN(4); _ebss = .;
+    } > RAM
+    _estack = ORIGIN(RAM) + LENGTH(RAM);
+}
