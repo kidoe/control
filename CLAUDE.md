@@ -40,7 +40,7 @@ away for convenience.
   Cortex-M0+ cannot do at all.
 - **No allocation and no OS calls, ever.** The caller owns the `synth_t`, which
   is why its fields sit in the header: an MCU declares `static synth_t s;`.
-  4184 bytes at 8 voices on ARM32, of which 1544 is the event queue.
+  4256 bytes at 8 voices on ARM32, of which 1544 is the event queue.
 - **`synth_render()` is the only function for the audio callback**, and it is
   real-time safe. It also drains scheduled events, splitting the block at their
   frame offsets so a sequencer step lands on its own frame.
@@ -69,12 +69,12 @@ away for convenience.
 
   | one 96-frame block | instructions | of the budget |
   |---|---|---|
-  | nothing sounding | 7,061 | 2.1% |
-  | 8 voices, no events | 118,091 | 35.1% |
-  | 8 voices, one parameter change | 119,824 | 35.7% |
-  | 8 voices, 16 parameter changes | 145,485 | 43.3% |
-  | 8 voices, 8 notes starting | 131,529 | 39.1% |
-  | 8 voices, 16 notes starting | 146,616 | 43.6% |
+  | nothing sounding | 7,062 | 2.1% |
+  | 8 voices, no events | 119,052 | 35.4% |
+  | 8 voices, one parameter change | 120,786 | 35.9% |
+  | 8 voices, 16 parameter changes | 146,461 | 43.6% |
+  | 8 voices, 8 notes starting | 132,809 | 39.5% |
+  | 8 voices, 16 notes starting | 148,216 | 44.1% |
 
   The map from a parameter to the units it reaches is a switch with no default,
   so `-Wswitch` refuses a parameter nobody has placed in it, and a test checks
@@ -171,9 +171,16 @@ order the units are actually wired in `synth_render()`.
   the sweep is a tuned beep. Negative amounts sweep up onto the note instead.
   Its amount ships centred, so it is silent in every patch that predates it, and
   the envelope is not advanced while it is. With it switched on, 8 voices go
-  from 51.7 to 79.7 million instructions a second on a Cortex-M4F: it is the
+  from 52.7 to 81.0 million instructions a second on a Cortex-M4F: it is the
   most expensive modulation in the library, because it forces the oscillator to
   be retuned on every control tick and that relays out the VOSIM pulses.
+- **Glide**: portamento, in seconds, linear in semitones so the time is the
+  same whatever the interval. A note starts on the pitch of the one played
+  before it and travels; the first note of a session has nothing to come from
+  and is in tune at once. Held as the distance still to travel rather than as a
+  position, so a voice that has arrived needs no target and no further work, and
+  each voice carries its own — a chord built one note at a time does not drag
+  the notes already in it. Off by default.
 - **Amplifier**: per-note level, velocity sensitivity, and soft saturation
   `x(1+d)/(1+d|x|)`, which is the identity at `d = 0` and provably keeps
   `|x| <= 1` mapped to `|y| <= 1`.
@@ -198,7 +205,7 @@ cmake --build build
 cd build && ctest --output-on-failure
 ```
 
-102 test functions, 254 assertions, no audio hardware needed. Spectra are
+106 test functions, 267 assertions, no audio hardware needed. Spectra are
 measured with a Goertzel probe at exact frequencies rather than asserted on the
 shape of the code, so the tests survive refactoring and catch real regressions.
 
@@ -224,8 +231,8 @@ Be honest about this line; a lot of it cannot be checked from a container.
 - **Cross-compiles and fits, but has never run**: bare metal ARM. CI builds the
   library and `backends/embedded/rp2040_example.c` for Cortex-M0+ and
   Cortex-M4F with `-Wconversion -Werror` and runs the dependency check on both.
-  Measured at 8 voices: 8.8 KB of flash and 4.6 KB of RAM on M0+, 8.1 KB and
-  4.6 KB on M4F — on an RP2040 that is 0.4% of its flash and 1.7% of its SRAM,
+  Measured at 8 voices: 9.1 KB of flash and 4.7 KB of RAM on M0+, 8.3 KB and
+  4.7 KB on M4F — on an RP2040 that is 0.4% of its flash and 1.7% of its SRAM,
   so memory is not the constraint.
 
   CPU is the constraint, and it is now measured rather than guessed.
@@ -234,11 +241,11 @@ Be honest about this line; a lot of it cannot be checked from a container.
 
   | instructions per second of audio | M4F | M0 |
   |---|---|---|
-  | silent, 8 empty slots | 3.7 M | 10.4 M |
-  | sine, 1 voice | 9.7 M | 209 M |
-  | sine, 8 voices | 51.7 M | 1593 M |
-  | saw, 8 voices | 51.3 M | 1367 M |
-  | sine, 8 voices + pitch sweep | 79.7 M | 2605 M |
+  | silent, 8 empty slots | 3.8 M | 11.2 M |
+  | sine, 1 voice | 9.9 M | 210 M |
+  | sine, 8 voices | 52.7 M | 1598 M |
+  | saw, 8 voices | 52.3 M | 1371 M |
+  | sine, 8 voices + pitch sweep | 81.0 M | 2614 M |
 
   Read these as a floor. QEMU counts instructions retired, not cycles, and
   models neither flash wait states nor the multi-cycle loads and taken branches
@@ -252,11 +259,11 @@ Be honest about this line; a lot of it cannot be checked from a container.
     per call" a reader might assume from the symbol list — thirty times the
     whole render loop.
   - **M4F-class hardware is the supported target, and now with a number.**
-    51.7 M instructions a second for 8 voices is 31% of a 168 MHz STM32F405 at
+    52.7 M instructions a second for 8 voices is 31% of a 168 MHz STM32F405 at
     one instruction per cycle. Since that is a floor, treat 8 voices as usable
     and leave room for whatever else the firmware does.
   - **The Pico is still out of reach, but no longer by an order of magnitude.**
-    A single sine voice needs 209 M instructions per second of audio, 1.7 times
+    A single sine voice needs 210 M instructions per second of audio, 1.7 times
     a 125 MHz RP2040 core at one instruction per cycle, where before the
     modulation skips it was 2.8 times. Overclocked to 250 MHz one voice is
     within sight of fitting at one instruction per cycle — which real silicon

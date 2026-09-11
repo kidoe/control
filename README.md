@@ -3,7 +3,7 @@
 A polyphonic synthesis core in C11 that runs from the same source on a desktop,
 on a microcontroller, and on Android.
 
-It is small — 8.1 KB of code and 4.6 KB of RAM at eight voices on a Cortex-M4F —
+It is small — 8.3 KB of code and 4.7 KB of RAM at eight voices on a Cortex-M4F —
 because it has no dependencies at all. No libm, no malloc, no threads, no OS. Pitch, curves, sine,
 tangent and exponentials are arithmetic; the caller owns the memory; the audio
 callback calls one function.
@@ -52,6 +52,9 @@ and the order the units are wired in `synth_render()`.
 - **Pitch envelope** — attack and decay, in octaves. This is what makes
   percussion possible: a sine falling an octave and a half onto a low note in
   forty milliseconds is a kick drum; the same note without the sweep is a beep.
+- **Glide** — portamento, in seconds. A note starts on the pitch of the one
+  before it and travels; each voice carries its own, so a chord built one note
+  at a time does not drag the notes already in it.
 - **Amplifier** — per-note level, velocity sensitivity, and a soft saturation
   that is exactly the identity when the drive is zero.
 
@@ -138,7 +141,7 @@ program; CI tests 4, 8 and 32.
 The point of this library is portability, so the claims about it are measured
 rather than asserted, and the ones that are not are labelled.
 
-- **Verified here**: the core and its 102 tests, under gcc and clang with
+- **Verified here**: the core and its 106 tests, under gcc and clang with
   `-Wconversion -Werror`, at three voice counts, with the headers compiled as
   C++ and with parameter names stripped. Spectra are measured with a Goertzel
   probe at exact frequencies rather than asserted on the shape of the code, and
@@ -152,8 +155,8 @@ rather than asserted, and the ones that are not are labelled.
   On Cortex-M4F the whole library needs one symbol: `memset`.
 - **Measured on emulated silicon**: `tools/bench-arm/run.sh` renders a second
   of audio on QEMU's Cortex-M0 and Cortex-M4F models and counts instructions
-  with a TCG plugin. Eight voices cost 51.7 M instructions a second on the M4F
-  and 1593 M on the M0 — soft float is about 30x the whole render loop, not the
+  with a TCG plugin. Eight voices cost 52.7 M instructions a second on the M4F
+  and 1598 M on the M0 — soft float is about 30x the whole render loop, not the
   modest per-call tax the symbol list suggests. So an M4F-class part runs eight
   voices in about a third of a 168 MHz core, and an RP2040 still cannot manage
   one voice in real time; reaching an M0+ means a fixed-point path.

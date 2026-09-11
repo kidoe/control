@@ -47,7 +47,10 @@ static const synth_param_info_t k_param_info[SYNTH_PARAM_COUNT] = {
        section is silent in every patch that predates it. */
     SYNTH_PARAM_ENTRY("pitch_env_amount", -4.0f, 4.0f, 0.5f, SYNTH_CURVE_LINEAR),
     SYNTH_PARAM_ENTRY("pitch_env_attack", 0.0f, 2.0f, 0.0f, SYNTH_CURVE_CUBIC),
-    SYNTH_PARAM_ENTRY("pitch_env_decay", 0.001f, 4.0f, 0.3f, SYNTH_CURVE_CUBIC)
+    SYNTH_PARAM_ENTRY("pitch_env_decay", 0.001f, 4.0f, 0.3f, SYNTH_CURVE_CUBIC),
+    /* Seconds for a note to travel from the one before it. Zero is off, which
+       is where it ships, so no existing patch acquires a glide. */
+    SYNTH_PARAM_ENTRY("glide", 0.0f, 2.0f, 0.0f, SYNTH_CURVE_CUBIC)
 };
 
 static float clamp01(float v)
@@ -189,9 +192,42 @@ static void voice_apply_lfo(synth_t *s, synth_voice_t *v)
 static void voice_tune_osc(const mod_t *m, synth_voice_t *v)
 {
     synth_osc_set_freq(&v->osc,
-                       synth_note_to_hz((float)v->note + m->pitch_bend
+                       synth_note_to_hz((float)v->note + m->pitch_bend + v->glide
                                         + m->lfo_to_pitch * v->lfo_value
                                         + 12.0f * m->pitch_env_amount * v->pitch_env.level));
+}
+
+/* A glide is held as the distance still to travel rather than as a position, so
+   it needs no target of its own: it decays to zero and the note is simply in
+   tune again. Linear in semitones, so the time is the same whatever the
+   interval, which is what a glide control is taken to mean. */
+static void voice_glide_step(synth_voice_t *v)
+{
+    v->glide -= v->glide_step;
+    if ((v->glide_step > 0.0f) ? (v->glide <= 0.0f) : (v->glide >= 0.0f)) {
+        v->glide = 0.0f;
+        v->glide_step = 0.0f;
+    }
+}
+
+/* Starts a voice on the pitch of the note before it, with the distance to make
+   up over the glide time. Nothing to glide from — the first note of a session,
+   or a glide time of zero — leaves it in tune from the first sample. */
+static void voice_start_glide(synth_t *s, synth_voice_t *v, int note)
+{
+    float seconds = synth_param_denorm(SYNTH_PARAM_GLIDE, s->params[SYNTH_PARAM_GLIDE]);
+    float ticks;
+
+    v->glide = 0.0f;
+    v->glide_step = 0.0f;
+    if (seconds > 0.0f && s->last_note >= 0.0f && s->sample_rate > 0.0f) {
+        ticks = seconds * s->sample_rate * (1.0f / (float)SYNTH_MOD_INTERVAL);
+        if (ticks >= 1.0f) {
+            v->glide = s->last_note - (float)note;
+            v->glide_step = v->glide / ticks;
+        }
+    }
+    s->last_note = (float)note;
 }
 
 /* The filter's cutoff is set in octaves so the envelope and the keyboard move it
@@ -238,6 +274,7 @@ void synth_init(synth_t *s, float sample_rate)
     s->sample_rate = (sample_rate > 0.0f) ? sample_rate : 44100.0f;
     s->age_counter = 0;
     s->pitch_bend = 0.0f;
+    s->last_note = -1.0f;
     atomic_store_explicit(&s->queue.head, 0u, memory_order_relaxed);
     atomic_store_explicit(&s->queue.tail, 0u, memory_order_relaxed);
     s->frame_time = 0;
@@ -264,6 +301,8 @@ void synth_init(synth_t *s, float sample_rate)
         synth_amp_init(&v->amp);
         synth_lfo_init(&v->lfo, s->sample_rate, 0xC2B2AE35u + (unsigned)i * 0x27D4EB2Fu);
         v->lfo_value = 0.0f;
+        v->glide = 0.0f;
+        v->glide_step = 0.0f;
         v->amp_base = 0.0f;
         v->note = 60;
         v->held = 0;
@@ -297,12 +336,15 @@ void synth_reset(synth_t *s)
         v->pitch_env.stage = SYNTH_ENV_IDLE;
         v->pitch_env.level = 0.0f;
         v->pitch_env.time = 0.0f;
+        v->glide = 0.0f;
+        v->glide_step = 0.0f;
         v->held = 0;
         v->velocity = 0.0f;
         v->age = 0;
     }
     s->age_counter = 0;
     s->mod_counter = 0;
+    s->last_note = -1.0f; /* nothing sounded, so the next note has nothing to glide from */
 }
 
 void synth_set_sample_rate(synth_t *s, float sample_rate)
@@ -395,6 +437,7 @@ void synth_note_on(synth_t *s, int note, float velocity)
     voice_apply_amp(s, &m, v);
     voice_apply_envelope(s, v);
     voice_apply_pitch(s, v);
+    voice_start_glide(s, v, note);
     synth_env_gate_on(&v->amp_env);
     synth_env_gate_on(&v->filter_env);
     synth_env_gate_on(&v->pitch_env);
@@ -467,6 +510,7 @@ static unsigned param_reaches(synth_param_t param)
     /* Read straight out of render_block every time, never stored in a voice. */
     case SYNTH_PARAM_MASTER_GAIN:
     case SYNTH_PARAM_FILTER_MODE:
+    case SYNTH_PARAM_GLIDE: /* read by the next note_on, never held in a voice */
         return 0u;
 
     case SYNTH_PARAM_OSC_WAVE:
@@ -643,7 +687,10 @@ static void render_block(synth_t *s, float *out, int n_frames)
                 if (moves_cutoff) {
                     voice_tune_filter(&m, voice, level);
                 }
-                if (moves_pitch) {
+                if (voice->glide != 0.0f) {
+                    voice_glide_step(voice);
+                    voice_tune_osc(&m, voice);
+                } else if (moves_pitch) {
                     voice_tune_osc(&m, voice);
                 }
             }

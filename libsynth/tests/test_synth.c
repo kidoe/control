@@ -2476,26 +2476,29 @@ static void test_pitch_env_defaults_change_nothing(void)
    moved would reinterpret every saved sound in silence. */
 static void test_new_parameters_are_appended(void)
 {
-    CHECK(SYNTH_PARAM_PITCH_ENV_AMOUNT == SYNTH_PARAM_LFO_TO_AMP + 1);
-    CHECK(SYNTH_PARAM_PITCH_ENV_DECAY == SYNTH_PARAM_COUNT - 1);
-    /* The indices this library has published, spelled out so that moving one
-       fails here rather than at a host that already has patches on disk. */
+    /* Every index this library has published, spelled out, so that moving one
+       fails here rather than at a host that already has patches on disk. A new
+       parameter adds a line at the bottom and changes nothing above it. */
     CHECK(SYNTH_PARAM_MASTER_GAIN == 0);
     CHECK(SYNTH_PARAM_FILTER_ENV_AMOUNT == 17);
     CHECK(SYNTH_PARAM_AMP_VELOCITY == 24);
     CHECK(SYNTH_PARAM_LFO_TO_AMP == 29);
+    CHECK(SYNTH_PARAM_PITCH_ENV_AMOUNT == 30);
+    CHECK(SYNTH_PARAM_PITCH_ENV_ATTACK == 31);
+    CHECK(SYNTH_PARAM_PITCH_ENV_DECAY == 32);
+    CHECK(SYNTH_PARAM_GLIDE == 33);
 }
 
-/* A patch from a build with fewer parameters. Filling what it does not carry
-   with zeros would put the new bipolar amount at its negative extreme, so the
-   short load fills from the defaults instead and the old sound comes back
-   unchanged. */
+/* A patch from the build before the pitch envelope existed. Filling what it
+   does not carry with zeros would put that bipolar amount at its negative
+   extreme, so the short load fills from the defaults instead and the old sound
+   comes back unchanged. */
 static void test_a_short_patch_loads_at_its_defaults(void)
 {
     synth_t s;
     static float buf[512];
     float patch[SYNTH_PARAM_COUNT];
-    int older = SYNTH_PARAM_COUNT - 3;
+    int older = SYNTH_PARAM_PITCH_ENV_AMOUNT;
     int i;
 
     synth_init(&s, SR);
@@ -2712,6 +2715,113 @@ static void test_a_parameter_change_reaches_everything_it_should(void)
     }
 }
 
+/* Portamento: a note starts on the pitch of the one before it and travels. */
+static void test_glide_starts_a_note_on_the_previous_pitch(void)
+{
+    synth_t s;
+    static float buf[512];
+    float at_start, at_end;
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_GLIDE, 0.63f); /* about half a second */
+
+    /* The first note has nothing to come from, so it must be in tune at once. */
+    synth_note_on(&s, 45, 1.0f); /* 110 Hz */
+    CHECK_NEAR(rendered_hz(&s, buf, 512, 0.1f), 110.0f, 6.0f);
+    render_seconds(&s, buf, 512, 0.6f);
+    synth_note_off(&s, 45);
+    /* Right through the release: rendered_hz counts crossings of the sum, so a
+       note still dying would be measured along with the new one. */
+    render_seconds(&s, buf, 512, 0.6f);
+
+    /* The second starts where the first was and arrives at its own pitch. */
+    synth_note_on(&s, 57, 1.0f); /* 220 Hz */
+    at_start = rendered_hz(&s, buf, 512, 0.03f);
+    render_seconds(&s, buf, 512, 1.0f);
+    at_end = rendered_hz(&s, buf, 512, 0.2f);
+
+    CHECK(at_start < 140.0f);
+    CHECK_NEAR(at_end, 220.0f, 8.0f);
+}
+
+/* The control is a time, so a longer one has the note further from home at the
+   same moment. */
+static void test_glide_time_sets_how_long_the_travel_takes(void)
+{
+    synth_t s;
+    static float buf[512];
+    float quick, slow;
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_GLIDE, 0.4f); /* about 130 ms */
+    synth_note_on(&s, 45, 1.0f);
+    render_seconds(&s, buf, 512, 0.3f);
+    synth_note_off(&s, 45);
+    render_seconds(&s, buf, 512, 0.6f);
+    synth_note_on(&s, 69, 1.0f);
+    render_seconds(&s, buf, 512, 0.2f); /* long over */
+    quick = rendered_hz(&s, buf, 512, 0.1f);
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_GLIDE, 0.9f); /* about 1.5 s */
+    synth_note_on(&s, 45, 1.0f);
+    render_seconds(&s, buf, 512, 0.3f);
+    synth_note_off(&s, 45);
+    render_seconds(&s, buf, 512, 0.6f);
+    synth_note_on(&s, 69, 1.0f);
+    render_seconds(&s, buf, 512, 0.2f); /* barely started */
+    slow = rendered_hz(&s, buf, 512, 0.1f);
+
+    CHECK_NEAR(quick, 440.0f, 12.0f);
+    CHECK(slow < quick * 0.6f);
+}
+
+/* Off by default, and off means exactly off: a note is in tune from its first
+   sample however many notes came before it. */
+static void test_no_glide_by_default(void)
+{
+    synth_t s;
+    static float buf[512];
+
+    CHECK_NEAR(synth_param_denorm(SYNTH_PARAM_GLIDE,
+                                  synth_param_info(SYNTH_PARAM_GLIDE)->default_norm),
+               0.0f, 1e-6f);
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_note_on(&s, 45, 1.0f);
+    render_seconds(&s, buf, 512, 0.3f);
+    synth_note_off(&s, 45);
+    render_seconds(&s, buf, 512, 0.6f); /* let it die, so only the new note is heard */
+    synth_note_on(&s, 69, 1.0f);
+    CHECK_NEAR(rendered_hz(&s, buf, 512, 0.05f), 440.0f, 20.0f);
+}
+
+/* Each voice carries its own travel, so a chord built one note at a time does
+   not drag the notes already in it. */
+static void test_a_glide_belongs_to_its_own_voice(void)
+{
+    synth_t s;
+    static float buf[512];
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_GLIDE, 0.7f);
+    synth_note_on(&s, 45, 1.0f);
+    render_seconds(&s, buf, 512, 0.5f);   /* in tune, nothing to travel */
+    CHECK(s.voices[0].glide == 0.0f);
+
+    synth_note_on(&s, 69, 1.0f);          /* a second voice, travelling */
+    CHECK(s.voices[0].glide == 0.0f);
+    CHECK(s.voices[1].glide != 0.0f);
+
+    render_seconds(&s, buf, 512, 2.0f);
+    CHECK(s.voices[1].glide == 0.0f);     /* and it arrives */
+}
+
 int main(void)
 {
     test_note_to_hz();
@@ -2816,6 +2926,10 @@ int main(void)
     test_turning_a_depth_up_mid_note_wakes_the_lfo();
     test_a_filter_nothing_modulates_is_left_alone();
     test_a_parameter_change_reaches_everything_it_should();
+    test_glide_starts_a_note_on_the_previous_pitch();
+    test_glide_time_sets_how_long_the_travel_takes();
+    test_no_glide_by_default();
+    test_a_glide_belongs_to_its_own_voice();
 
     if (g_failures == 0) {
         printf("all tests passed\n");
