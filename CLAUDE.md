@@ -58,6 +58,29 @@ away for convenience.
   block into a `mod_t` rather than per voice per control tick. It used to do the
   latter, and a fifth of every instruction the library executed went on looking
   up parameters that could not have changed.
+- **A block has a deadline, so the worst block is the number that matters.**
+  96 frames at 48 kHz is 2 ms, which on a 168 MHz Cortex-M4F is 336,000 cycles.
+  Throughput averages hide that, and hid a real fault: a parameter change used
+  to re-apply every unit of every voice, so the block one landed in cost 453,000
+  instructions — 135% of the budget — and a bar of automation arriving at once
+  cost 5.5 million, sixteen times over. A change now re-applies only the units
+  that parameter reaches, and `tools/bench-block/run.sh` keeps the figures
+  honest:
+
+  | one 96-frame block | instructions | of the budget |
+  |---|---|---|
+  | nothing sounding | 7,061 | 2.1% |
+  | 8 voices, no events | 118,091 | 35.1% |
+  | 8 voices, one parameter change | 119,824 | 35.7% |
+  | 8 voices, 16 parameter changes | 145,485 | 43.3% |
+  | 8 voices, 8 notes starting | 131,529 | 39.1% |
+  | 8 voices, 16 notes starting | 146,616 | 43.6% |
+
+  The map from a parameter to the units it reaches is a switch with no default,
+  so `-Wswitch` refuses a parameter nobody has placed in it, and a test checks
+  every parameter under every waveform against the long way round: a sounding
+  voice edited with `synth_set_param()` has to come out identical to one edited
+  by re-loading the whole patch.
 - **Modulation that reaches nothing is not computed.** Every depth in the
   library is bipolar and neutral at its centre, so "does this reach anything"
   is one comparison, and it is loop-invariant: `render_block()` decides once per
@@ -175,7 +198,7 @@ cmake --build build
 cd build && ctest --output-on-failure
 ```
 
-101 test functions, 254 assertions, no audio hardware needed. Spectra are
+102 test functions, 254 assertions, no audio hardware needed. Spectra are
 measured with a Goertzel probe at exact frequencies rather than asserted on the
 shape of the code, so the tests survive refactoring and catch real regressions.
 
@@ -201,7 +224,7 @@ Be honest about this line; a lot of it cannot be checked from a container.
 - **Cross-compiles and fits, but has never run**: bare metal ARM. CI builds the
   library and `backends/embedded/rp2040_example.c` for Cortex-M0+ and
   Cortex-M4F with `-Wconversion -Werror` and runs the dependency check on both.
-  Measured at 8 voices: 8.6 KB of flash and 4.6 KB of RAM on M0+, 7.9 KB and
+  Measured at 8 voices: 8.8 KB of flash and 4.6 KB of RAM on M0+, 8.1 KB and
   4.6 KB on M4F — on an RP2040 that is 0.4% of its flash and 1.7% of its SRAM,
   so memory is not the constraint.
 

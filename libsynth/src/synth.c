@@ -445,8 +445,115 @@ int synth_active_voices(const synth_t *s)
     return count;
 }
 
+/* Which parts of a voice a parameter reaches. Re-applying all of them costs
+   about three blocks of audio, and a host moving a knob or playing back
+   automation sends one parameter change per frame, so the block a change lands
+   in used to overrun its deadline on an MCU. The switch has no default, so
+   -Wswitch makes the compiler refuse a parameter nobody has placed here. */
+enum {
+    UNIT_OSC         = 1u << 0, /* waveform settings: knee, VOSIM, terrain */
+    UNIT_OSC_TUNE    = 1u << 1, /* the oscillator's frequency */
+    UNIT_AMP         = 1u << 2,
+    UNIT_AMP_ENV     = 1u << 3,
+    UNIT_FILTER_ENV  = 1u << 4, /* the filter envelope's times, which also tunes */
+    UNIT_FILTER_TUNE = 1u << 5,
+    UNIT_LFO         = 1u << 6,
+    UNIT_PITCH_ENV   = 1u << 7
+};
+
+static unsigned param_reaches(synth_param_t param)
+{
+    switch (param) {
+    /* Read straight out of render_block every time, never stored in a voice. */
+    case SYNTH_PARAM_MASTER_GAIN:
+    case SYNTH_PARAM_FILTER_MODE:
+        return 0u;
+
+    case SYNTH_PARAM_OSC_WAVE:
+    case SYNTH_PARAM_PD_KNEE:
+    case SYNTH_PARAM_VOSIM_FORMANT:
+    case SYNTH_PARAM_VOSIM_PULSES:
+    case SYNTH_PARAM_VOSIM_DECAY:
+    case SYNTH_PARAM_TERRAIN_RADIUS:
+    case SYNTH_PARAM_TERRAIN_RATIO:
+        return UNIT_OSC;
+
+    case SYNTH_PARAM_AMP_DELAY:
+    case SYNTH_PARAM_AMP_ATTACK:
+    case SYNTH_PARAM_AMP_HOLD:
+    case SYNTH_PARAM_AMP_DECAY:
+    case SYNTH_PARAM_AMP_SUSTAIN:
+    case SYNTH_PARAM_AMP_RELEASE:
+        return UNIT_AMP_ENV;
+
+    case SYNTH_PARAM_FILTER_CUTOFF:
+    case SYNTH_PARAM_FILTER_Q:
+    case SYNTH_PARAM_FILTER_ENV_AMOUNT:
+    case SYNTH_PARAM_FILTER_KEY_TRACK:
+    case SYNTH_PARAM_LFO_TO_CUTOFF:
+        return UNIT_FILTER_TUNE;
+
+    case SYNTH_PARAM_FILTER_ENV_ATTACK:
+    case SYNTH_PARAM_FILTER_ENV_DECAY:
+    case SYNTH_PARAM_FILTER_ENV_SUSTAIN:
+    case SYNTH_PARAM_FILTER_ENV_RELEASE:
+        return UNIT_FILTER_ENV;
+
+    case SYNTH_PARAM_AMP_DRIVE:
+    case SYNTH_PARAM_AMP_VELOCITY:
+    case SYNTH_PARAM_LFO_TO_AMP: /* the tremolo lives in the amplifier */
+        return UNIT_AMP;
+
+    case SYNTH_PARAM_LFO_RATE:
+    case SYNTH_PARAM_LFO_SHAPE:
+        return UNIT_LFO;
+
+    /* Centring a pitch depth has to put a sounding note back where it belongs,
+       so both of these retune even though neither is a frequency. */
+    case SYNTH_PARAM_LFO_TO_PITCH:
+        return UNIT_OSC_TUNE;
+    case SYNTH_PARAM_PITCH_ENV_AMOUNT:
+        return UNIT_PITCH_ENV | UNIT_OSC_TUNE;
+    case SYNTH_PARAM_PITCH_ENV_ATTACK:
+    case SYNTH_PARAM_PITCH_ENV_DECAY:
+        return UNIT_PITCH_ENV;
+
+    case SYNTH_PARAM_COUNT:
+        break;
+    }
+    return ~0u;
+}
+
+static void voice_apply(synth_t *s, const mod_t *m, synth_voice_t *v, unsigned units)
+{
+    if (units & UNIT_OSC) {
+        voice_apply_osc(s, v);
+    }
+    if (units & UNIT_LFO) {
+        voice_apply_lfo(s, v);
+    }
+    if (units & UNIT_AMP) {
+        voice_apply_amp(s, m, v);
+    }
+    if (units & UNIT_AMP_ENV) {
+        voice_apply_envelope(s, v);
+    }
+    if (units & UNIT_FILTER_ENV) {
+        voice_apply_filter(s, m, v);
+    } else if (units & UNIT_FILTER_TUNE) {
+        voice_tune_filter(m, v, v->filter_env.level);
+    }
+    if (units & UNIT_PITCH_ENV) {
+        voice_apply_pitch(s, v);
+    }
+    if (units & UNIT_OSC_TUNE) {
+        voice_tune_osc(m, v);
+    }
+}
+
 void synth_set_param(synth_t *s, synth_param_t param, float norm)
 {
+    unsigned units;
     mod_t m;
     int i;
 
@@ -454,21 +561,15 @@ void synth_set_param(synth_t *s, synth_param_t param, float norm)
         return;
     }
     s->params[param] = clamp01(norm);
+    units = param_reaches(param);
+    if (units == 0u) {
+        return;
+    }
     mod_load(s, &m);
 
     /* Edits reach sounding voices, as they did in the JSyn prototype. */
     for (i = 0; i < SYNTH_MAX_VOICES; ++i) {
-        voice_apply_osc(s, &s->voices[i]);
-        voice_apply_lfo(s, &s->voices[i]);
-        voice_apply_amp(s, &m, &s->voices[i]);
-        voice_apply_envelope(s, &s->voices[i]);
-        voice_apply_filter(s, &m, &s->voices[i]);
-        voice_apply_pitch(s, &s->voices[i]);
-        /* A modulation depth turned back down has to put the note where it
-           belongs. The render loop stops retuning the oscillator once nothing
-           moves the pitch, so without this the voice would hold whatever offset
-           it had when the control was centred. */
-        voice_tune_osc(&m, &s->voices[i]);
+        voice_apply(s, &m, &s->voices[i], units);
     }
 }
 

@@ -187,6 +187,10 @@ void synth_osc_init(synth_osc_t *osc, float sample_rate)
     osc->vosim_pulses = 3;
     osc->wave = SYNTH_WAVE_SINE;
     osc->pd_wanted = 0.5f;
+    /* Outside the clamped range either control can take, so the first real
+       call below cannot mistake this for a setting already in force. */
+    osc->terrain_radius = 0.0f;
+    osc->terrain_ratio = 0;
     synth_osc_set_pd_knee(osc, 0.5f);
     synth_osc_set_terrain(osc, 0.7f, 1);
     synth_osc_set_noise_seed(osc, 0x9E3779B9u);
@@ -289,6 +293,14 @@ void synth_osc_set_terrain(synth_osc_t *osc, float radius, int ratio)
         ratio = 1;
     } else if (ratio > 8) {
         ratio = 8;
+    }
+
+    /* Walking the orbit costs about as much as a third of a block of audio for
+       eight voices, and it depends on nothing but these two numbers. Setting
+       them to what they already are is the common case — every note_on
+       reapplies the whole voice — so it is worth one comparison to find out. */
+    if (radius == osc->terrain_radius && ratio == osc->terrain_ratio) {
+        return;
     }
 
     osc->terrain_radius = radius;

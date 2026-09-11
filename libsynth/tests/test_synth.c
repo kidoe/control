@@ -2650,6 +2650,68 @@ static void test_a_filter_nothing_modulates_is_left_alone(void)
     CHECK(opened > settled * 2.0f);
 }
 
+/* A parameter change re-applies only the parts of a voice that parameter
+   reaches, because re-applying all of them cost more than three blocks of
+   audio. This checks that shortcut against the long way round, for every
+   parameter there is and under every waveform: synth_load_patch() re-applies
+   everything, so a sounding voice edited through synth_set_param() has to come
+   out identical. State rather than audio, because a parameter placed in the
+   wrong bucket can leave a voice wrong in a way this patch happens not to
+   sound — until the next note does.
+
+   Only the sounding voice. An idle one is tuned lazily, by the note_on that
+   claims it, so its oscillator frequency is deliberately undefined in between
+   and the two paths leave it in different places. */
+static void test_a_parameter_change_reaches_everything_it_should(void)
+{
+    static float quick[256], full[256];
+    int p, w;
+
+    for (w = 0; w < SYNTH_WAVE_COUNT; ++w) {
+        for (p = 0; p < SYNTH_PARAM_COUNT; ++p) {
+            synth_t a, b;
+            float patch[SYNTH_PARAM_COUNT];
+            float before = synth_param_info((synth_param_t)p)->default_norm;
+            float after = (before > 0.5f) ? 0.2f : 0.8f;
+
+            synth_init(&a, SR);
+            synth_init(&b, SR);
+            synth_set_param(&a, SYNTH_PARAM_OSC_WAVE, (float)w / (float)(SYNTH_WAVE_COUNT - 1));
+            synth_set_param(&b, SYNTH_PARAM_OSC_WAVE, (float)w / (float)(SYNTH_WAVE_COUNT - 1));
+            synth_set_param(&a, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+            synth_set_param(&b, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+            synth_note_on(&a, 55, 0.8f);
+            synth_note_on(&b, 55, 0.8f);
+            synth_render(&a, quick, 256);
+            synth_render(&b, full, 256);
+
+            /* The same edit, once through the shortcut and once through a
+               whole patch load, which reapplies every unit of every voice. */
+            synth_set_param(&a, (synth_param_t)p, after);
+            synth_save_patch(&b, patch);
+            patch[p] = after;
+            synth_load_patch(&b, patch);
+
+            /* synth_voice_t is all four-byte members, so this compares state
+               and not padding. */
+            if (memcmp(&a.voices[0], &b.voices[0], sizeof a.voices[0]) != 0) {
+                printf("FAIL %s:%d: parameter %d leaves a voice wrong on wave %d\n",
+                       __FILE__, __LINE__, p, w);
+                ++g_failures;
+            }
+
+            /* And the audio that state produces, which is the point of it. */
+            synth_render(&a, quick, 256);
+            synth_render(&b, full, 256);
+            if (memcmp(quick, full, sizeof quick) != 0) {
+                printf("FAIL %s:%d: parameter %d diverges in the audio on wave %d\n",
+                       __FILE__, __LINE__, p, w);
+                ++g_failures;
+            }
+        }
+    }
+}
+
 int main(void)
 {
     test_note_to_hz();
@@ -2753,6 +2815,7 @@ int main(void)
     test_a_modulation_nothing_hears_changes_nothing();
     test_turning_a_depth_up_mid_note_wakes_the_lfo();
     test_a_filter_nothing_modulates_is_left_alone();
+    test_a_parameter_change_reaches_everything_it_should();
 
     if (g_failures == 0) {
         printf("all tests passed\n");

@@ -3,7 +3,7 @@
 A polyphonic synthesis core in C11 that runs from the same source on a desktop,
 on a microcontroller, and on Android.
 
-It is small — 7.9 KB of code and 4.6 KB of RAM at eight voices on a Cortex-M4F —
+It is small — 8.1 KB of code and 4.6 KB of RAM at eight voices on a Cortex-M4F —
 because it has no dependencies at all. No libm, no malloc, no threads, no OS. Pitch, curves, sine,
 tangent and exponentials are arithmetic; the caller owns the memory; the audio
 callback calls one function.
@@ -77,10 +77,15 @@ synth_event_t e = { synth_frame_time(&synth) + 4800,
 synth_schedule(&synth, &e);          /* safe from a UI or sequencer thread */
 ```
 
+It returns 0 when the fixed-size queue is full, which is a signal to schedule
+less far ahead, not an error to ignore.
+
 `synth_render()` splits its block at those frame offsets, so a sequencer step
-lands on its own frame rather than on the buffer boundary. It returns 0 when the
-fixed-size queue is full, which is a signal to schedule less far ahead, not an
-error to ignore.
+lands on its own frame rather than on the buffer boundary. A block also has a
+deadline — 96 frames at 48 kHz is 2 ms — so what a *busy* block costs is
+measured rather than averaged away: sixteen notes or sixteen parameter changes
+landing in the same one take it from 35% of a 168 MHz Cortex-M4F's budget to
+44%, not past it. `tools/bench-block/run.sh` is where that comes from.
 
 ## Several parts
 
@@ -133,7 +138,7 @@ program; CI tests 4, 8 and 32.
 The point of this library is portability, so the claims about it are measured
 rather than asserted, and the ones that are not are labelled.
 
-- **Verified here**: the core and its 101 tests, under gcc and clang with
+- **Verified here**: the core and its 102 tests, under gcc and clang with
   `-Wconversion -Werror`, at three voice counts, with the headers compiled as
   C++ and with parameter names stripped. Spectra are measured with a Goertzel
   probe at exact frequencies rather than asserted on the shape of the code, and
