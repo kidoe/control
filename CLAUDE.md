@@ -106,6 +106,14 @@ order the units are actually wired in `synth_render()`.
 - **Filter**: topology-preserving SVF, low/high/band-pass, with its own DAHDSR
   envelope and key tracking. Retuned every `SYNTH_MOD_INTERVAL` samples because
   recomputing coefficients costs far more than a sample of audio.
+- **LFO**: one per voice, retriggered by its note, running at control rate with
+  sine, triangle, square and sample-and-hold shapes. It reaches the cutoff in
+  octaves, the pitch in semitones and the amplitude as a dip that can only take
+  level away. All three depths ship at exactly zero, so the section changes no
+  existing patch. Vibrato is the one destination that costs anything, since
+  retuning the oscillator recomputes the VOSIM pulse layout, so it is skipped
+  entirely when its depth is zero: 8 voices cost 0.73% of a core with the filter
+  modulated and 0.86% with vibrato as well.
 - **Amplifier**: per-note level, velocity sensitivity, and soft saturation
   `x(1+d)/(1+d|x|)`, which is the identity at `d = 0` and provably keeps
   `|x| <= 1` mapped to `|y| <= 1`.
@@ -121,7 +129,7 @@ cmake --build build
 cd build && ctest --output-on-failure
 ```
 
-79 test functions, 202 assertions, no audio hardware needed. Spectra are
+86 test functions, 219 assertions, no audio hardware needed. Spectra are
 measured with a Goertzel probe at exact frequencies rather than asserted on the
 shape of the code, so the tests survive refactoring and catch real regressions.
 
@@ -147,8 +155,8 @@ Be honest about this line; a lot of it cannot be checked from a container.
 - **Cross-compiles and fits, but has never run**: bare metal ARM. CI builds the
   library and `backends/embedded/rp2040_example.c` for Cortex-M0+ and
   Cortex-M4F with `-Wconversion -Werror` and runs the dependency check on both.
-  Measured at 8 voices: 7.1 KB of flash and 4.0 KB of RAM on M0+, 6.4 KB and
-  4.0 KB on M4F — on an RP2040 that is 0.3% of its flash and 1.5% of its SRAM,
+  Measured at 8 voices: 8.1 KB of flash and 4.3 KB of RAM on M0+, 7.3 KB and
+  4.3 KB on M4F — on an RP2040 that is 0.3% of its flash and 1.5% of its SRAM,
   so memory is not the constraint.
 
   CPU is, and nothing here measures it. An M0+ has no FPU, so each of the

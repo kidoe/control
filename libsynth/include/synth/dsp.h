@@ -77,6 +77,31 @@ void  synth_osc_set_noise_seed(synth_osc_t *osc, unsigned seed);
 float synth_osc_next(synth_osc_t *osc);
 
 typedef enum {
+    SYNTH_LFO_SINE = 0,
+    SYNTH_LFO_TRIANGLE,
+    SYNTH_LFO_SQUARE,
+    SYNTH_LFO_RANDOM,   /* a new level each cycle, held: stepped modulation */
+    SYNTH_LFO_COUNT
+} synth_lfo_shape_t;
+
+/* Deliberately not a synth_osc_t: an oscillator is 76 bytes of settings a
+   modulator has no use for, and this runs at control rate rather than per
+   sample. Output is bipolar, [-1, 1]. */
+typedef struct {
+    float sample_rate;
+    float phase;
+    float phase_inc;
+    unsigned random_state;
+    float random_value;
+    synth_lfo_shape_t shape;
+} synth_lfo_t;
+
+void  synth_lfo_init(synth_lfo_t *lfo, float sample_rate, unsigned seed);
+void  synth_lfo_set_rate(synth_lfo_t *lfo, float hz, int frames_per_step);
+void  synth_lfo_retrigger(synth_lfo_t *lfo);
+float synth_lfo_next(synth_lfo_t *lfo);
+
+typedef enum {
     SYNTH_ENV_IDLE = 0,
     SYNTH_ENV_DELAY,
     SYNTH_ENV_ATTACK,

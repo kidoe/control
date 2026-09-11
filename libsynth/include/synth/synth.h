@@ -61,6 +61,11 @@ typedef enum {
     SYNTH_PARAM_FILTER_KEY_TRACK,
     SYNTH_PARAM_AMP_DRIVE,
     SYNTH_PARAM_AMP_VELOCITY,
+    SYNTH_PARAM_LFO_RATE,
+    SYNTH_PARAM_LFO_SHAPE,
+    SYNTH_PARAM_LFO_TO_CUTOFF,
+    SYNTH_PARAM_LFO_TO_PITCH,
+    SYNTH_PARAM_LFO_TO_AMP,
     SYNTH_PARAM_COUNT
 } synth_param_t;
 
@@ -86,6 +91,9 @@ typedef struct {
     synth_amp_t amp;
     synth_env_t amp_env;
     synth_env_t filter_env;
+    synth_lfo_t lfo;
+    float amp_base;    /* the velocity part of the amp level, before tremolo */
+    float lfo_value;   /* held between control-rate updates */
     int note;          /* MIDI note number; stays valid through the release */
     int held;          /* 1 while the key is down */
     float velocity;    /* [0, 1] */
