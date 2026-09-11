@@ -12,11 +12,9 @@
 #ifdef __cplusplus
 #include <atomic>
 #define SYNTH_ATOMIC_UINT std::atomic<unsigned>
-#define SYNTH_ATOMIC_U64 std::atomic<uint64_t>
 #else
 #include <stdatomic.h>
 #define SYNTH_ATOMIC_UINT _Atomic unsigned
-#define SYNTH_ATOMIC_U64 _Atomic uint64_t
 #endif
 
 #ifdef __cplusplus
@@ -31,9 +29,10 @@ extern "C" {
  *     the synth_t storage (`static synth_t s;` on an MCU, malloc elsewhere).
  *   - synth_render() is the only function meant for the audio callback, and it
  *     is real-time safe.
- *   - Control calls (note on/off, parameters) are not internally synchronized.
- *     Call them from the audio thread, or marshal them there from the host's
- *     own queue.
+ *   - Control calls (note on/off, parameters) are not internally synchronized
+ *     and belong to the audio thread. A host driving the engine from a UI or
+ *     sequencer thread goes through synth_schedule(), which is the one entry
+ *     point here that is safe to call from anywhere.
  */
 
 typedef enum {
@@ -109,6 +108,20 @@ typedef struct {
                                 semitones for a pitch bend */
 } synth_event_t;
 
+/* Publishes the 64-bit frame counter to other threads using only 32-bit
+   atomics, which are lock-free on every target this library runs on. A 64-bit
+   atomic would not be: on 32-bit ARM it becomes a call into libatomic, and on a
+   Cortex-M0+ there is no instruction to build one from at all.
+
+   The writer bumps the sequence to an odd value, writes the halves, then bumps
+   it to the next even one. A reader that sees an odd sequence, or a different
+   one either side of its read, tries again. */
+typedef struct {
+    SYNTH_ATOMIC_UINT sequence;
+    SYNTH_ATOMIC_UINT low;
+    SYNTH_ATOMIC_UINT high;
+} synth_frame_clock_t;
+
 /* Single producer, single consumer. The producer only ever advances tail, the
    consumer only ever advances head, so neither needs a read-modify-write and
    the queue works on targets with no atomic RMW at all. */
@@ -128,7 +141,8 @@ typedef struct {
     int mod_counter;    /* paces filter retuning, see SYNTH_MOD_INTERVAL */
     float pitch_bend;   /* semitones, applied on top of every note */
     synth_event_queue_t queue;
-    SYNTH_ATOMIC_U64 frame_time;
+    uint64_t frame_time;          /* the audio thread's own copy */
+    synth_frame_clock_t clock;    /* the copy other threads may read */
 } synth_t;
 
 /* Lifecycle */

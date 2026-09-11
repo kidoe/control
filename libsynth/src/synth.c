@@ -46,9 +46,13 @@ static float clamp01(float v)
     return (v > 1.0f) ? 1.0f : v;
 }
 
+/* One unsigned comparison rather than two signed ones: a negative value wraps
+   to something huge and fails the same test. The ARM EABI stores an enum in the
+   smallest type that fits it, so on those targets the enum is unsigned and a
+   `>= 0` test is not just redundant, it is a warning. */
 static int param_is_valid(synth_param_t param)
 {
-    return (int)param >= 0 && (int)param < SYNTH_PARAM_COUNT;
+    return (unsigned)param < (unsigned)SYNTH_PARAM_COUNT;
 }
 
 const synth_param_info_t *synth_param_info(synth_param_t param)
@@ -152,7 +156,10 @@ void synth_init(synth_t *s, float sample_rate)
     s->pitch_bend = 0.0f;
     atomic_store_explicit(&s->queue.head, 0u, memory_order_relaxed);
     atomic_store_explicit(&s->queue.tail, 0u, memory_order_relaxed);
-    atomic_store_explicit(&s->frame_time, 0u, memory_order_relaxed);
+    s->frame_time = 0;
+    atomic_store_explicit(&s->clock.sequence, 0u, memory_order_relaxed);
+    atomic_store_explicit(&s->clock.low, 0u, memory_order_relaxed);
+    atomic_store_explicit(&s->clock.high, 0u, memory_order_relaxed);
 
     for (i = 0; i < SYNTH_PARAM_COUNT; ++i) {
         s->params[i] = k_param_info[i].default_norm;
@@ -407,9 +414,35 @@ int synth_schedule(synth_t *s, const synth_event_t *event)
     return 1;
 }
 
+static void clock_publish(synth_frame_clock_t *clock, uint64_t value)
+{
+    unsigned sequence = atomic_load_explicit(&clock->sequence, memory_order_relaxed);
+
+    atomic_store_explicit(&clock->sequence, sequence + 1u, memory_order_relaxed);
+    atomic_thread_fence(memory_order_release);
+    atomic_store_explicit(&clock->low, (unsigned)(value & 0xFFFFFFFFu), memory_order_relaxed);
+    atomic_store_explicit(&clock->high, (unsigned)(value >> 32), memory_order_relaxed);
+    atomic_thread_fence(memory_order_release);
+    atomic_store_explicit(&clock->sequence, sequence + 2u, memory_order_relaxed);
+}
+
 uint64_t synth_frame_time(const synth_t *s)
 {
-    return atomic_load_explicit(&s->frame_time, memory_order_relaxed);
+    const synth_frame_clock_t *clock = &s->clock;
+    unsigned before;
+    unsigned after;
+    unsigned low;
+    unsigned high;
+
+    do {
+        before = atomic_load_explicit(&clock->sequence, memory_order_acquire);
+        low = atomic_load_explicit(&clock->low, memory_order_relaxed);
+        high = atomic_load_explicit(&clock->high, memory_order_relaxed);
+        atomic_thread_fence(memory_order_acquire);
+        after = atomic_load_explicit(&clock->sequence, memory_order_relaxed);
+    } while ((before & 1u) != 0u || before != after);
+
+    return ((uint64_t)high << 32) | (uint64_t)low;
 }
 
 static const synth_event_t *queue_peek(synth_event_queue_t *q)
@@ -455,7 +488,7 @@ static void apply_event(synth_t *s, const synth_event_t *event)
 
 void synth_render(synth_t *s, float *out, int n_frames)
 {
-    uint64_t start = atomic_load_explicit(&s->frame_time, memory_order_relaxed);
+    uint64_t start = s->frame_time; /* only the audio thread touches this */
     int done = 0;
 
     if (n_frames <= 0) {
@@ -488,6 +521,6 @@ void synth_render(synth_t *s, float *out, int n_frames)
         done += chunk;
     }
 
-    atomic_store_explicit(&s->frame_time, start + (uint64_t)n_frames,
-                          memory_order_relaxed);
+    s->frame_time = start + (uint64_t)n_frames;
+    clock_publish(&s->clock, s->frame_time);
 }

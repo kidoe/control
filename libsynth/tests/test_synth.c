@@ -1651,6 +1651,157 @@ static void test_events_are_applied_in_order(void)
     CHECK(synth_active_voices(&s) == 0);
 }
 
+/*
+ * Several independent parts, each with its own patch and voices, is several
+ * synth_t rather than a channel field. These pin down what that relies on.
+ */
+
+static void test_instances_do_not_share_parameters(void)
+{
+    synth_t a, b;
+
+    synth_init(&a, SR);
+    synth_init(&b, SR);
+
+    synth_set_param(&a, SYNTH_PARAM_OSC_WAVE,
+                    (float)SYNTH_WAVE_VOSIM / (float)(SYNTH_WAVE_COUNT - 1));
+    synth_set_param(&a, SYNTH_PARAM_FILTER_Q, 1.0f);
+
+    CHECK_NEAR(synth_get_param(&b, SYNTH_PARAM_OSC_WAVE), 0.0f, 1e-6f);
+    CHECK_NEAR(synth_get_param(&b, SYNTH_PARAM_FILTER_Q), 0.0f, 1e-6f);
+    CHECK(b.voices[0].osc.wave == SYNTH_WAVE_SINE);
+}
+
+static void test_instances_do_not_share_voices(void)
+{
+    synth_t a, b;
+    static float buf[64];
+    int i;
+
+    /* Filling one part's polyphony must not steal from another's. */
+    synth_init(&a, SR);
+    synth_init(&b, SR);
+    for (i = 0; i < SYNTH_MAX_VOICES; ++i) {
+        synth_note_on(&a, 40 + i, 1.0f);
+    }
+    synth_note_on(&b, 60, 1.0f);
+    synth_render(&a, buf, 64);
+    synth_render(&b, buf, 64);
+
+    CHECK(synth_active_voices(&a) == SYNTH_MAX_VOICES);
+    CHECK(synth_active_voices(&b) == 1);
+    CHECK(b.voices[0].note == 60);
+}
+
+static void test_instances_keep_their_clocks_in_step(void)
+{
+    synth_t parts[4];
+    static float buf[128];
+    int i, block;
+
+    /* A sequencer plans one set of absolute frames for every part, so parts
+       rendered the same number of frames have to agree on what frame it is. */
+    for (i = 0; i < 4; ++i) {
+        synth_init(&parts[i], SR);
+    }
+    for (block = 0; block < 10; ++block) {
+        for (i = 0; i < 4; ++i) {
+            synth_render(&parts[i], buf, 128);
+        }
+    }
+    for (i = 0; i < 4; ++i) {
+        CHECK(synth_frame_time(&parts[i]) == 1280);
+    }
+}
+
+static void test_a_new_instance_starts_its_clock_at_zero(void)
+{
+    synth_t running, added;
+    static float buf[128];
+
+    /* The consequence of the clock being per instance: a part created after
+       the others begins at frame 0, not at their frame. A host adding a track
+       mid-session has to account for that, which is why a groovebox is better
+       off creating every part up front. */
+    synth_init(&running, SR);
+    synth_render(&running, buf, 4096);
+
+    synth_init(&added, SR);
+    CHECK(synth_frame_time(&running) == 4096);
+    CHECK(synth_frame_time(&added) == 0);
+}
+
+static void test_instances_do_not_share_scheduled_events(void)
+{
+    synth_t a, b;
+    static float buf_a[512];
+    static float buf_b[512];
+    synth_event_t ev;
+
+    synth_init(&a, SR);
+    synth_init(&b, SR);
+    synth_set_param(&a, SYNTH_PARAM_OSC_WAVE, 1.0f / (float)(SYNTH_WAVE_COUNT - 1));
+    synth_set_param(&b, SYNTH_PARAM_OSC_WAVE, 1.0f / (float)(SYNTH_WAVE_COUNT - 1));
+
+    ev.frame = 100;
+    ev.type = SYNTH_EVENT_NOTE_ON;
+    ev.index = 60;
+    ev.value = 1.0f;
+    CHECK(synth_schedule(&a, &ev) == 1);
+
+    ev.frame = 300;
+    ev.index = 67;
+    CHECK(synth_schedule(&b, &ev) == 1);
+
+    synth_render(&a, buf_a, 512);
+    synth_render(&b, buf_b, 512);
+
+    /* Each part heard only its own event, each on its own frame. */
+    CHECK(synth_active_voices(&a) == 1);
+    CHECK(synth_active_voices(&b) == 1);
+    CHECK(a.voices[0].note == 60);
+    CHECK(b.voices[0].note == 67);
+    CHECK(first_onset(buf_a, 512) >= 100 && first_onset(buf_a, 512) <= 102);
+    CHECK(first_onset(buf_b, 512) >= 300 && first_onset(buf_b, 512) <= 302);
+}
+
+static void test_summed_instances_need_host_headroom(void)
+{
+    synth_t parts[4];
+    static float mix[2048];
+    static float buf[2048];
+    float peak_one = 0.0f;
+    float peak_all = 0.0f;
+    int i, frame;
+
+    /* Each part is bounded by 1 on its own, so a host summing parts has to
+       scale them: four parts in unison reach four. Nothing in the library can
+       decide that budget, so it must be stated rather than discovered. */
+    for (i = 0; i < 4; ++i) {
+        synth_init(&parts[i], SR);
+        synth_set_param(&parts[i], SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+        synth_set_param(&parts[i], SYNTH_PARAM_MASTER_GAIN, 1.0f);
+        synth_note_on(&parts[i], 57, 1.0f);
+    }
+
+    for (frame = 0; frame < 2048; ++frame) {
+        mix[frame] = 0.0f;
+    }
+    for (i = 0; i < 4; ++i) {
+        synth_render(&parts[i], buf, 2048);
+        for (frame = 0; frame < 2048; ++frame) {
+            mix[frame] += buf[frame];
+        }
+        if (i == 0) {
+            peak_one = peak(buf, 2048);
+        }
+    }
+    peak_all = peak(mix, 2048);
+
+    CHECK(peak_one <= 1.001f);
+    CHECK(peak_all > peak_one * 3.0f);
+}
+
 int main(void)
 {
     test_note_to_hz();
@@ -1718,6 +1869,12 @@ int main(void)
     test_scheduled_param_and_all_notes_off();
     test_splitting_a_block_does_not_change_the_audio();
     test_events_are_applied_in_order();
+    test_instances_do_not_share_parameters();
+    test_instances_do_not_share_voices();
+    test_instances_keep_their_clocks_in_step();
+    test_a_new_instance_starts_its_clock_at_zero();
+    test_instances_do_not_share_scheduled_events();
+    test_summed_instances_need_host_headroom();
 
     if (g_failures == 0) {
         printf("all tests passed\n");

@@ -70,6 +70,32 @@ jobs:
               /tmp/cpp_check.cpp build/libsynth.a -o /tmp/cpp_check
           /tmp/cpp_check
 
+      - name: Cross-compiles for bare metal ARM
+        # The target the portability claims are about. It catches things a
+        # desktop build cannot: the ARM EABI stores enums in the smallest type
+        # that fits, so range checks written for a 32-bit enum warn here, and a
+        # core with no FPU turns every float operation into a libgcc call.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends gcc-arm-none-eabi
+          for target in "-mcpu=cortex-m0plus -mthumb" \
+                        "-mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16"; do
+            echo "=== $target ==="
+            rm -rf arm-build && mkdir arm-build
+            for unit in dsp synth midi; do
+              arm-none-eabi-gcc $target -Os -std=c11 \
+                -Wall -Wextra -Wpedantic -Wconversion -Werror \
+                -Ilibsynth/include -c libsynth/src/$unit.c -o arm-build/$unit.o
+            done
+            arm-none-eabi-gcc $target -Os -std=c11 \
+              -Wall -Wextra -Wpedantic -Wconversion -Werror \
+              -Ilibsynth/include -c libsynth/backends/embedded/rp2040_example.c \
+              -o arm-build/example.o
+            arm-none-eabi-ar rcs arm-build/libsynth.a arm-build/*.o
+            sh libsynth/tools/check-no-external-deps.sh arm-build/libsynth.a arm-none-eabi-nm
+            arm-none-eabi-size -t arm-build/libsynth.a | tail -1
+          done
+
       - name: Builds with parameter names compiled out
         # The flash-saving path for small targets, easy to break unnoticed.
         run: |
