@@ -1802,6 +1802,208 @@ static void test_summed_instances_need_host_headroom(void)
     CHECK(peak_all > peak_one * 3.0f);
 }
 
+static void test_noise_bandwidth_follows_the_note(void)
+{
+    static float low[ALIAS_FRAMES];
+    static float high[ALIAS_FRAMES];
+    float low_top = 0.0f, high_top = 0.0f;
+    int i;
+
+    /* Values are drawn once a cycle and interpolated across it, so the note
+       sets how fast the noise moves: low rumbles, high hisses. */
+    render_osc(low, 80.0f, SYNTH_WAVE_NOISE);
+    render_osc(high, 6000.0f, SYNTH_WAVE_NOISE);
+
+    for (i = 4; i <= 12; ++i) {
+        low_top += goertzel(low, ALIAS_FRAMES, 1000.0f * (float)i);
+        high_top += goertzel(high, ALIAS_FRAMES, 1000.0f * (float)i);
+    }
+    CHECK(high_top > low_top * 4.0f);
+}
+
+static void test_noise_is_interpolated_not_stepped(void)
+{
+    synth_osc_t osc;
+    float previous;
+    float biggest_step = 0.0f;
+    int moved = 0;
+    int i;
+
+    /* Interpolating across the cycle rather than holding a value is what makes
+       this the prototype's RedNoise instead of sample-and-hold: at a low note
+       every step is tiny, where holding would sit still and then jump. */
+    synth_osc_init(&osc, SR);
+    osc.wave = SYNTH_WAVE_NOISE;
+    synth_osc_set_freq(&osc, 80.0f);
+    previous = synth_osc_next(&osc);
+
+    for (i = 0; i < 4096; ++i) {
+        float value = synth_osc_next(&osc);
+        float step = fabsf(value - previous);
+
+        if (step > biggest_step) {
+            biggest_step = step;
+        }
+        if (step > 1e-9f) {
+            ++moved;
+        }
+        previous = value;
+    }
+
+    /* A cycle at 80 Hz spans about 551 samples, so a full-scale swing crosses
+       it in steps of roughly 2/551. Sample-and-hold would step by up to 2. */
+    CHECK(biggest_step < 0.05f);
+    CHECK(moved > 4000);
+}
+
+static void test_noise_is_centred_and_bounded(void)
+{
+    static float buf[ALIAS_FRAMES];
+    float mean = 0.0f;
+    int i;
+
+    render_osc(buf, 3000.0f, SYNTH_WAVE_NOISE);
+    for (i = 0; i < ALIAS_FRAMES; ++i) {
+        mean += buf[i];
+        CHECK(fabsf(buf[i]) <= 1.0f);
+    }
+    CHECK_NEAR(mean / (float)ALIAS_FRAMES, 0.0f, 0.05f);
+}
+
+static void test_noise_is_deterministic_but_differs_per_voice(void)
+{
+    synth_t a, b;
+    static float buf_a[2048];
+    static float buf_b[2048];
+    synth_osc_t one, two;
+    int i, same = 0;
+
+    /* Two runs of the same patch must render identically, or nothing in this
+       suite could compare buffers. */
+    synth_init(&a, SR);
+    synth_init(&b, SR);
+    synth_set_param(&a, SYNTH_PARAM_OSC_WAVE,
+                    (float)SYNTH_WAVE_NOISE / (float)(SYNTH_WAVE_COUNT - 1));
+    synth_set_param(&b, SYNTH_PARAM_OSC_WAVE,
+                    (float)SYNTH_WAVE_NOISE / (float)(SYNTH_WAVE_COUNT - 1));
+    synth_note_on(&a, 72, 1.0f);
+    synth_note_on(&b, 72, 1.0f);
+    synth_render(&a, buf_a, 2048);
+    synth_render(&b, buf_b, 2048);
+    CHECK(memcmp(buf_a, buf_b, sizeof(buf_a)) == 0);
+
+    /* And the engine must hand every voice its own stream, or voices stacked on
+       one chord would sum into a louder copy of the same noise rather than a
+       thicker sound. Checked on the voices the engine actually built. */
+    for (i = 0; i < SYNTH_MAX_VOICES; ++i) {
+        int j;
+
+        for (j = i + 1; j < SYNTH_MAX_VOICES; ++j) {
+            if (a.voices[i].osc.noise_state == a.voices[j].osc.noise_state) {
+                ++same;
+            }
+        }
+    }
+    CHECK(same == 0);
+
+    (void)one;
+    (void)two;
+}
+
+static void test_noise_seed_never_gets_stuck(void)
+{
+    synth_osc_t osc;
+    float energy = 0.0f;
+    int i;
+
+    /* xorshift stays at zero forever if it ever reaches it, so a zero seed has
+       to be refused rather than accepted into silence. */
+    synth_osc_init(&osc, SR);
+    osc.wave = SYNTH_WAVE_NOISE;
+    synth_osc_set_noise_seed(&osc, 0u);
+    synth_osc_set_freq(&osc, 4000.0f);
+    for (i = 0; i < 2048; ++i) {
+        energy += fabsf(synth_osc_next(&osc));
+    }
+    CHECK(energy > 100.0f);
+}
+
+static void test_patch_round_trips(void)
+{
+    synth_t a, b;
+    float patch[SYNTH_PARAM_COUNT];
+    static float buf_a[2048];
+    static float buf_b[2048];
+    int i;
+
+    synth_init(&a, SR);
+    synth_set_param(&a, SYNTH_PARAM_OSC_WAVE,
+                    (float)SYNTH_WAVE_VOSIM / (float)(SYNTH_WAVE_COUNT - 1));
+    synth_set_param(&a, SYNTH_PARAM_FILTER_Q, 0.7f);
+    synth_set_param(&a, SYNTH_PARAM_AMP_DRIVE, 0.4f);
+    synth_set_param(&a, SYNTH_PARAM_VOSIM_FORMANT, 0.8f);
+    synth_save_patch(&a, patch);
+
+    synth_init(&b, SR);
+    synth_load_patch(&b, patch);
+
+    for (i = 0; i < SYNTH_PARAM_COUNT; ++i) {
+        CHECK_NEAR(synth_get_param(&b, (synth_param_t)i),
+                   synth_get_param(&a, (synth_param_t)i), 1e-6f);
+    }
+
+    /* Restoring the numbers is only half of it: the voices have to be carrying
+       the restored settings, which means the two render the same. */
+    synth_note_on(&a, 55, 0.9f);
+    synth_note_on(&b, 55, 0.9f);
+    synth_render(&a, buf_a, 2048);
+    synth_render(&b, buf_b, 2048);
+    CHECK(memcmp(buf_a, buf_b, sizeof(buf_a)) == 0);
+}
+
+static void test_patch_load_clamps_and_survives_rubbish(void)
+{
+    synth_t s;
+    float patch[SYNTH_PARAM_COUNT];
+    static float buf[512];
+    int i;
+
+    for (i = 0; i < SYNTH_PARAM_COUNT; ++i) {
+        patch[i] = (i & 1) ? 9.0f : -9.0f;
+    }
+    synth_init(&s, SR);
+    synth_load_patch(&s, patch);
+
+    for (i = 0; i < SYNTH_PARAM_COUNT; ++i) {
+        float v = synth_get_param(&s, (synth_param_t)i);
+        CHECK(v >= 0.0f && v <= 1.0f);
+    }
+
+    synth_note_on(&s, 60, 1.0f);
+    synth_render(&s, buf, 512);
+    for (i = 0; i < 512; ++i) {
+        CHECK(isfinite(buf[i]));
+    }
+}
+
+static void test_patches_keep_instances_apart(void)
+{
+    synth_t a, b;
+    float patch[SYNTH_PARAM_COUNT];
+
+    /* The point of patches here: one per track, loaded into its own instance. */
+    synth_init(&a, SR);
+    synth_init(&b, SR);
+    synth_set_param(&a, SYNTH_PARAM_OSC_WAVE,
+                    (float)SYNTH_WAVE_NOISE / (float)(SYNTH_WAVE_COUNT - 1));
+    synth_save_patch(&a, patch);
+    synth_load_patch(&b, patch);
+
+    CHECK(b.voices[0].osc.wave == SYNTH_WAVE_NOISE);
+    synth_set_param(&b, SYNTH_PARAM_OSC_WAVE, 0.0f);
+    CHECK(a.voices[0].osc.wave == SYNTH_WAVE_NOISE);
+}
+
 int main(void)
 {
     test_note_to_hz();
@@ -1875,6 +2077,14 @@ int main(void)
     test_a_new_instance_starts_its_clock_at_zero();
     test_instances_do_not_share_scheduled_events();
     test_summed_instances_need_host_headroom();
+    test_noise_bandwidth_follows_the_note();
+    test_noise_is_interpolated_not_stepped();
+    test_noise_is_centred_and_bounded();
+    test_noise_is_deterministic_but_differs_per_voice();
+    test_noise_seed_never_gets_stuck();
+    test_patch_round_trips();
+    test_patch_load_clamps_and_survives_rubbish();
+    test_patches_keep_instances_apart();
 
     if (g_failures == 0) {
         printf("all tests passed\n");

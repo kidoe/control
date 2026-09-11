@@ -21,13 +21,15 @@ typedef enum {
     SYNTH_WAVE_PD,       /* phase distortion, after the Casio CZ */
     SYNTH_WAVE_VOSIM,    /* Kaegi & Tempelaars sin^2 pulse train */
     SYNTH_WAVE_TERRAIN,  /* Mitsuhashi wave terrain: an orbit over a surface */
+    SYNTH_WAVE_NOISE,    /* interpolated random values, after the prototype's RedNoise */
     SYNTH_WAVE_COUNT
 } synth_wave_t;
 
 #define SYNTH_VOSIM_MAX_PULSES 16
 
-/* Every waveform here is a pure function of the phase, so the oscillator holds
-   its settings but needs no per-sample state beyond the phase itself. */
+/* Every waveform here but noise is a pure function of the phase, so apart from
+   the noise generator's own state the oscillator holds settings rather than
+   running state. */
 typedef struct {
     float sample_rate;
     float phase;     /* [0, 1) */
@@ -51,6 +53,14 @@ typedef struct {
     float terrain_dc;
     int terrain_ratio;    /* y advances this many times per x turn */
 
+    /* Noise is the one waveform that cannot be a function of the phase alone.
+       The phase still sets its bandwidth: a new random value is drawn each
+       cycle and interpolated across it, so a low note rumbles and a high one
+       hisses. */
+    unsigned noise_state;
+    float noise_from;
+    float noise_to;
+
     synth_wave_t wave;
 } synth_osc_t;
 
@@ -60,6 +70,10 @@ void  synth_osc_set_freq(synth_osc_t *osc, float hz);
 void  synth_osc_set_pd_knee(synth_osc_t *osc, float knee);
 void  synth_osc_set_vosim(synth_osc_t *osc, float formant_hz, int pulses, float decay);
 void  synth_osc_set_terrain(synth_osc_t *osc, float radius, int ratio);
+
+/* Decorrelates the noise between voices. Any non-zero value will do; the engine
+   seeds each voice from its index so a patch still renders identically twice. */
+void  synth_osc_set_noise_seed(synth_osc_t *osc, unsigned seed);
 float synth_osc_next(synth_osc_t *osc);
 
 typedef enum {

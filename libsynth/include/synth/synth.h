@@ -199,6 +199,19 @@ int  synth_active_voices(const synth_t *s);
 void  synth_set_param(synth_t *s, synth_param_t param, float norm);
 float synth_get_param(const synth_t *s, synth_param_t param);
 
+/*
+ * Patches. A patch is exactly the normalized parameters, so it is a plain array
+ * of floats with no format of its own: a groovebox giving each track its own
+ * sound stores one of these per track.
+ *
+ * The array is positional, tied to the parameter list this build was compiled
+ * with. That is fine to keep in memory or in a session file written and read by
+ * the same binary. To survive a version change, store the names from
+ * synth_param_info() alongside the values and match on those.
+ */
+void synth_save_patch(const synth_t *s, float patch[SYNTH_PARAM_COUNT]);
+void synth_load_patch(synth_t *s, const float patch[SYNTH_PARAM_COUNT]);
+
 /* Descriptors, for hosts that build UI or MIDI maps from the parameter list. */
 const synth_param_info_t *synth_param_info(synth_param_t param);
 float synth_param_denorm(synth_param_t param, float norm);

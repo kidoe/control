@@ -169,6 +169,9 @@ void synth_init(synth_t *s, float sample_rate)
         synth_voice_t *v = &s->voices[i];
 
         synth_osc_init(&v->osc, s->sample_rate);
+        /* Distinct per voice so unison notes do not share one noise stream, and
+           derived from the index so two runs of the same patch still match. */
+        synth_osc_set_noise_seed(&v->osc, 0x9E3779B9u + (unsigned)i * 0x85EBCA6Bu);
         synth_env_init(&v->amp_env, s->sample_rate);
         synth_env_init(&v->filter_env, s->sample_rate);
         synth_filter_init(&v->filter, s->sample_rate);
@@ -483,6 +486,33 @@ static void apply_event(synth_t *s, const synth_event_t *event)
         break;
     default:
         break;
+    }
+}
+
+void synth_save_patch(const synth_t *s, float patch[SYNTH_PARAM_COUNT])
+{
+    int i;
+
+    for (i = 0; i < SYNTH_PARAM_COUNT; ++i) {
+        patch[i] = s->params[i];
+    }
+}
+
+void synth_load_patch(synth_t *s, const float patch[SYNTH_PARAM_COUNT])
+{
+    int i;
+
+    for (i = 0; i < SYNTH_PARAM_COUNT; ++i) {
+        s->params[i] = clamp01(patch[i]);
+    }
+
+    /* One pass over the voices rather than one per parameter, which is what
+       calling synth_set_param in a loop would cost. */
+    for (i = 0; i < SYNTH_MAX_VOICES; ++i) {
+        voice_apply_osc(s, &s->voices[i]);
+        voice_apply_amp(s, &s->voices[i]);
+        voice_apply_envelope(s, &s->voices[i]);
+        voice_apply_filter(s, &s->voices[i]);
     }
 }
 
