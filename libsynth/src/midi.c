@@ -123,7 +123,7 @@ void synth_midi_map_cc(synth_midi_t *midi, int cc, synth_param_t param)
     if (cc < 0 || cc >= SYNTH_MIDI_CC_COUNT) {
         return;
     }
-    if ((int)param < 0 || (int)param >= SYNTH_PARAM_COUNT) {
+    if ((unsigned)param >= (unsigned)SYNTH_PARAM_COUNT) {
         return;
     }
     midi->cc_map[cc] = (signed char)param;

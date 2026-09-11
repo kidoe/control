@@ -28,14 +28,19 @@ Rules that keep this working:
 These are the reason the library exists. CI enforces them; do not trade them
 away for convenience.
 
-- **No external dependencies at all.** Not libm, not malloc, not libc. Pitch,
-  curves, sine, tangent and exponentials are all computed with arithmetic in
-  `src/dsp.c`. `tools/check-no-external-deps.sh` fails the build if a symbol
-  the core does not define ever appears — calling `sinf()` costs nothing on a
-  PC and silently breaks the microcontroller target.
+- **No external dependencies beyond compiler runtime.** No libm, no malloc, no
+  OS. Pitch, curves, sine, tangent and exponentials are all arithmetic in
+  `src/dsp.c`. What a cross build does pull in is unavoidable: on a core with no
+  FPU every float operation becomes an `__aeabi_*` call from libgcc, and struct
+  assignment becomes `memcpy`. On Cortex-M4F the whole library needs one symbol,
+  `memset`. `tools/check-no-external-deps.sh` separates those from real
+  dependencies and fails on the latter; it takes an `nm` to use, so it runs on
+  cross builds too. `__atomic_*` is deliberately not excused — it means asking
+  for an atomic wider than the target can do in one instruction, which a
+  Cortex-M0+ cannot do at all.
 - **No allocation and no OS calls, ever.** The caller owns the `synth_t`, which
   is why its fields sit in the header: an MCU declares `static synth_t s;`.
-  3400 bytes at 8 voices, of which 1544 is the event queue.
+  3416 bytes at 8 voices on ARM32, of which 1544 is the event queue.
 - **`synth_render()` is the only function for the audio callback**, and it is
   real-time safe. It also drains scheduled events, splitting the block at their
   frame offsets so a sequencer step lands on its own frame.
@@ -98,8 +103,18 @@ Be honest about this line; a lot of it cannot be checked from a container.
   48 kHz with 96-frame bursts on real hardware; reported failing to open on an
   API 37 emulator, which is why start() now degrades from exclusive mono rather
   than giving up. Neither report is reproducible from here.
-- **Never built**: any embedded target. "Runs on a microcontroller" is a design
-  claim backed by the dependency and memory checks, not by hardware.
+- **Cross-compiles and fits, but has never run**: bare metal ARM. CI builds the
+  library and `backends/embedded/rp2040_example.c` for Cortex-M0+ and
+  Cortex-M4F with `-Wconversion -Werror` and runs the dependency check on both.
+  Measured at 8 voices: 6.8 KB of flash and 3.9 KB of RAM on M0+, 6.2 KB and
+  3.9 KB on M4F — on an RP2040 that is 0.3% of its flash and 1.5% of its SRAM,
+  so memory is not the constraint.
+
+  CPU is, and nothing here measures it. An M0+ has no FPU, so each of the
+  eleven `__aeabi_*` float routines the build pulls in costs tens of cycles
+  where an M4F spends one instruction and needs none of them. Until someone
+  renders on real silicon and times it, treat M4F-class hardware as the
+  supported target and the Pico as unproven.
 
 ## Conventions
 
