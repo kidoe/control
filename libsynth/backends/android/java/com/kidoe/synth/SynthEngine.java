@@ -53,6 +53,13 @@ public final class SynthEngine {
     public static final int PARAM_PITCH_ENV_AMOUNT = 30;
     public static final int PARAM_PITCH_ENV_ATTACK = 31;
     public static final int PARAM_PITCH_ENV_DECAY = 32;
+    /**
+     * Portamento: seconds for a note to travel from the pitch of the one
+     * played before it. Zero, where it ships, is off. Each voice carries its
+     * own travel, so a chord built one note at a time does not drag the notes
+     * already in it.
+     */
+    public static final int PARAM_GLIDE = 33;
 
     /** Shape values for {@link #PARAM_LFO_SHAPE}, which is a stepped parameter. */
     public static final int LFO_SINE = 0;

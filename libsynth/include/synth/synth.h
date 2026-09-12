@@ -72,6 +72,7 @@ typedef enum {
     SYNTH_PARAM_PITCH_ENV_AMOUNT,
     SYNTH_PARAM_PITCH_ENV_ATTACK,
     SYNTH_PARAM_PITCH_ENV_DECAY,
+    SYNTH_PARAM_GLIDE,
     SYNTH_PARAM_COUNT
 } synth_param_t;
 
@@ -101,6 +102,8 @@ typedef struct {
     synth_lfo_t lfo;
     float amp_base;    /* the velocity part of the amp level, before tremolo */
     float lfo_value;   /* held between control-rate updates */
+    float glide;       /* semitones still to travel, signed; zero when arrived */
+    float glide_step;  /* taken off `glide` each control tick, same sign */
     int note;          /* MIDI note number; stays valid through the release */
     int held;          /* 1 while the key is down */
     float velocity;    /* [0, 1] */
@@ -156,6 +159,7 @@ typedef struct {
     int mod_counter;    /* paces filter retuning, see SYNTH_MOD_INTERVAL */
     float pitch_bend;   /* semitones, applied on top of every note */
     synth_event_queue_t queue;
+    float last_note;    /* what a glide starts from; -1 before anything is played */
     uint64_t frame_time;          /* the audio thread's own copy */
     synth_frame_clock_t clock;    /* the copy other threads may read */
 } synth_t;
