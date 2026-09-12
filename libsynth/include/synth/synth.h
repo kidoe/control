@@ -159,7 +159,12 @@ typedef struct {
     int mod_counter;    /* paces filter retuning, see SYNTH_MOD_INTERVAL */
     float pitch_bend;   /* semitones, applied on top of every note */
     synth_event_queue_t queue;
-    float last_note;    /* what a glide starts from; -1 before anything is played */
+    float last_note;            /* what a glide starts from; -1 before anything is played */
+
+    /* The wave terrain's cross-section belongs here rather than to a voice: it is
+       derived from two parameters and every voice of this instance orbits the
+       same one. */
+    synth_terrain_t terrain;
     uint64_t frame_time;          /* the audio thread's own copy */
     synth_frame_clock_t clock;    /* the copy other threads may read */
 } synth_t;
@@ -264,6 +269,60 @@ void synth_load_patch(synth_t *s, const float patch[SYNTH_PARAM_COUNT]);
    a saved sound would come back four octaves down rather than unchanged. Extra
    values, from a build with more parameters than this one, are ignored. */
 void synth_load_patch_n(synth_t *s, const float *patch, int count);
+
+/*
+ * Getting a whole patch across the thread boundary.
+ *
+ * synth_load_patch() belongs to the audio thread like everything else here, and
+ * a patch will not fit in a synth_event_t — it is an array, not a float — so a
+ * UI thread that wants to change a track's whole sound cannot go through
+ * synth_schedule(). Sending one parameter event per parameter is what is left,
+ * and it is both slower (each event re-applies the units that parameter reaches,
+ * where a whole patch applies every unit once) and liable to fill the queue: on
+ * a four-track build, four kits changing at once is four times SYNTH_PARAM_COUNT
+ * events against a queue of SYNTH_EVENT_QUEUE_LEN.
+ *
+ * So this is the second, and last, cross-thread channel: one queue per track,
+ * owned by the caller like the synth_t and the delay line are, in its own
+ * translation unit so a target that does not want it never links it. Two slots,
+ * lock-free, one writer and one reader:
+ *
+ *   synth_patch_send()   from the UI or sequencer thread; copies the array in
+ *   synth_patch_apply()  from the audio thread, at the top of the callback
+ *
+ * It holds two patches because the writer must never touch the slot the reader
+ * is reading. Send refuses, returning 0, when both are still the reader's —
+ * which takes three sends to one track inside a single block — and that is a
+ * signal to slow down rather than an error to ignore, exactly as it is for
+ * synth_schedule().
+ *
+ * When two patches are waiting, apply() loads only the newer one. That is not a
+ * shortcut: no audio is rendered between the two, and loading A then B leaves
+ * the engine in the same state as loading B, so the collapsed pass is identical
+ * and half the work. What it does mean is that a patch change lands on a block
+ * boundary rather than on an exact frame, which is the one thing a scheduled
+ * parameter event still does better.
+ */
+typedef struct {
+    float values[2][SYNTH_PARAM_COUNT];
+    int counts[2];
+    SYNTH_ATOMIC_UINT produced; /* written by the sender, read by the audio thread */
+    SYNTH_ATOMIC_UINT consumed; /* the other way round */
+} synth_patch_queue_t;
+
+void synth_patch_queue_init(synth_patch_queue_t *q);
+
+/* Copies `count` values out of `patch` and publishes them. Returns 0 when both
+   slots are still in use. `count` works as it does for synth_load_patch_n(), so
+   0 sends a track back to the defaults. Safe from any one thread; like the event
+   queue this is single-producer, so two threads sending to the same track need
+   their own arrangement. */
+int synth_patch_send(synth_patch_queue_t *q, const float *patch, int count);
+
+/* Loads the newest waiting patch into `s`, if any. Returns 1 when it loaded one
+   and 0 when nothing was waiting. Audio thread only, and before the render, so
+   the block that follows is the first one the new sound is heard in. */
+int synth_patch_apply(synth_patch_queue_t *q, synth_t *s);
 
 /* Descriptors, for hosts that build UI or MIDI maps from the parameter list. */
 const synth_param_info_t *synth_param_info(synth_param_t param);

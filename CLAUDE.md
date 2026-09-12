@@ -40,7 +40,10 @@ away for convenience.
   Cortex-M0+ cannot do at all.
 - **No allocation and no OS calls, ever.** The caller owns the `synth_t`, which
   is why its fields sit in the header: an MCU declares `static synth_t s;`.
-  4640 bytes at 8 voices on ARM32, of which 1544 is the event queue.
+  4656 bytes at 8 voices on ARM32, of which 1544 is the event queue. The two
+  optional pieces are the caller's too and sit outside it: the delay line's
+  buffer, and the 288-byte `synth_patch_queue_t` a host needs only if patches
+  arrive from another thread.
 - **`synth_render()` is the only function for the audio callback**, and it is
   real-time safe. It also drains scheduled events, splitting the block at their
   frame offsets so a sequencer step lands on its own frame.
@@ -50,13 +53,22 @@ away for convenience.
   to be cleared either. It costs one branch a frame on a value that cannot
   change inside a block — 290 instructions on a 96-frame block, measured, which
   is 0.3% of a block with eight voices in it.
-- **`synth_schedule()` is the only function safe to call from another thread.**
-  Everything else assumes the caller is the audio thread. It is lock-free and
-  never blocks, returning 0 when the fixed-size queue is full. A host driving
-  the engine from a UI or sequencer thread goes through it; calling
-  synth_note_on directly from there is the race this exists to close.
+- **Two functions are safe to call from another thread, and only two.**
+  `synth_schedule()` for events and `synth_patch_send()` for a whole patch;
+  everything else assumes the caller is the audio thread. Both are lock-free,
+  never block, and return 0 when their fixed-size storage is full. A host driving
+  the engine from a UI or sequencer thread goes through them; calling
+  synth_note_on directly from there is the race they exist to close. A patch
+  needs its own channel because it does not fit in a `synth_event_t` — it is an
+  array, not a float — and sending it one parameter at a time is both slower and
+  liable to overflow the event queue: 34 events per track, so four tracks
+  changing kit at once is 136 against a queue of 64. `src/patch_queue.c` is its
+  own translation unit, so a target with one fixed sound never links it.
 - **Polyphony is a compile-time constant** (`SYNTH_MAX_VOICES`), so each voice
-  count is a different program and CI tests 4, 8 and 32.
+  count is a different program and CI tests 1, 4, 8 and 32. One voice is in that
+  list because a pool sized to a single track is a configuration this file
+  recommends, and it had been quietly broken: six assertions expected a chord to
+  fit in a pool too small to hold it, which is voice stealing working correctly.
 - **Parameters are always normalized to [0, 1]**, with range, curve and name in
   a descriptor table, so a MIDI CC, an ADC reading and a UI slider all map onto
   them the same way. Reading one is not free — a bounds check, a clamp, a curve
@@ -75,33 +87,80 @@ away for convenience.
 
   | one 96-frame block | instructions | of the budget |
   |---|---|---|
-  | nothing sounding | 7,352 | 2.2% |
-  | 8 voices, no events | 105,218 | 31.3% |
-  | 8 voices, one parameter change | 106,955 | 31.8% |
-  | 8 voices, 16 parameter changes | 132,617 | 39.5% |
-  | 8 voices, 8 notes starting | 119,589 | 35.6% |
-  | 8 voices, 16 notes starting | 135,785 | 40.4% |
-  | 4 instances mixed, 2 voices each | 127,483 | 37.9% |
-  | 4 instances mixed, every slot full | 420,569 | 125.2% |
-  | 4 instances mixed, all silent | 29,690 | 8.8% |
+  | nothing sounding | 7,369 | 2.2% |
+  | 8 voices, no events | 105,235 | 31.3% |
+  | 8 voices, one parameter change | 106,972 | 31.8% |
+  | 8 voices, 16 parameter changes | 132,634 | 39.5% |
+  | 8 voices, every parameter as an event | 263,515 | 78.4% |
+  | 8 voices, a whole patch adopted | 219,135 | 65.2% |
+  | 8 voices, 8 notes starting | 119,147 | 35.5% |
+  | 8 voices, 16 notes starting | 134,884 | 40.1% |
+  | 4 instances mixed, 2 voices each | 127,584 | 38.0% |
+  | 4 instances mixed, every slot full | 420,670 | 125.2% |
+  | 4 instances, all four adopt a patch | 245,579 | 73.1% |
+  | 4 instances mixed, all silent | 29,791 | 8.9% |
 
-  The last three rows are the same arithmetic seen from the other side: the same
+  The instance rows are the same arithmetic seen from the other side: the same
   eight sounding voices cost 21% more spread over four instances than gathered
   in one, because each instance scans all of its slots on every block, and four
-  instances playing nothing at all still cost 8.8% of the budget. Thirty-two
+  instances playing nothing at all still cost 8.9% of the budget. Thirty-two
   voices over four tracks do not fit an M4F at all. On a phone they are nothing,
   which is why the Android bridge ships four tracks; on an M4F, four tracks want
   a voice count sized to a track. `SYNTH_MAX_VOICES=4` in the environment re-runs
   the whole table for such a build.
+
+  Those rows hold every slot sounding, which is the expensive end and not the
+  usual one. **A kit change costs what the voices it can be heard in cost**, and
+  three things had to go for that to be true. Measured as the change alone, with
+  the render subtracted:
+
+  | one kit change | 8 of 8 sounding | 1 of 8 sounding |
+  |---|---|---|
+  | before any of this | 440,066 | 348,348 |
+  | the terrain derived once per instance | 136,304 | 44,586 |
+  | idle slots skipped, the orbit walked only when something orbits it | 114,728 | **15,044** |
+
+  and the same change sent as one parameter event each, which is what a host
+  without `synth_patch_send()` has to do: 819,811 → 209,944 → 166,718 with every
+  slot sounding, and 726,377 → 116,510 → **30,463** with one. A kit change used to
+  overrun the 2 ms deadline on its own whatever was playing; it is now 4.5% of it
+  in the case a groovebox actually hits.
+
+  Each of the three came out of measuring one changed control at a time:
+
+  - **The two wave-terrain controls cost 328,527 instructions for one move** — a
+    whole deadline on their own — because every voice walked the orbit to derive a
+    cross-section that depends on nothing but those two numbers. It belongs to the
+    instance, and the second lap of each walk was only re-finding the extremes the
+    first had already passed.
+  - **A parameter change applied to every voice slot, sounding or not**, though an
+    idle slot is rebuilt from these same parameters by the note_on that claims it.
+    A test pins that: for every parameter under every waveform, a note played
+    after an edit comes out identical to one that was already sounding when the
+    edit arrived.
+  - **The orbit was walked even when nothing orbited it.** The walk is 21,545
+    instructions and only the terrain waveform reads its result, so a patch that
+    is not a terrain patch no longer pays for one. Switching to the terrain
+    derives then, against whatever the radius and ratio have become.
+
+  All of it is bit-identical to the previous behaviour: 12,544 samples across
+  every waveform with every parameter moved repeatedly against idle, sounding and
+  releasing voices, and 3,840 more switching the terrain in and out under a sweep
+  of both its controls.
 
   The map from a parameter to the units it reaches is a switch with no default,
   so `-Wswitch` refuses a parameter nobody has placed in it, and a test checks
   every parameter under every waveform against the long way round: a sounding
   voice edited with `synth_set_param()` has to come out identical to one edited
   by re-loading the whole patch.
-- **Modulation that reaches nothing is not computed.** Every depth in the
-  library is bipolar and neutral at its centre, so "does this reach anything"
-  is one comparison, and it is loop-invariant: `render_block()` decides once per
+- **What reaches nothing is not computed.** This is the rule the library keeps
+  finding new places to apply: a modulation depth at its centre, a parameter
+  change aimed at a voice slot nobody can hear, a wave terrain's cross-section
+  when the terrain is not the selected waveform.
+
+  For modulation it works because every depth in the library is bipolar and
+  neutral at its centre, so "does this reach anything" is one comparison, and it
+  is loop-invariant: `render_block()` decides once per
   block whether to advance each envelope and the LFO and whether to retune the
   oscillator and the filter. A patch that has not asked for modulation pays for
   none of it, which is 47% of the render loop. The one thing it
@@ -163,6 +222,19 @@ That is not the same as zero-filling: every bipolar control is neutral at its
 *centre*, so a zero-filled tail would load a saved sound four octaves down
 rather than unchanged.
 
+Loading one belongs to the audio thread, so a UI that changes a track's sound
+goes through `synth_patch_send()` and the audio callback answers with
+`synth_patch_apply()` before it renders. Two slots per track, lock-free, refusing
+rather than tearing when both are still the reader's — which takes three sends to
+one track inside a single block. When two are waiting, only the newer is loaded:
+no audio was rendered between them, and loading A and then B leaves exactly what
+loading B leaves, so the collapsed pass is identical and half the work. The cost
+of the channel when nothing is using it is 17 instructions a block per track, two
+atomic loads and a comparison.
+
+The one thing a scheduled parameter event still does better is land on an exact
+frame. A patch arrives at a block boundary, which at 96 frames is 2 ms.
+
 Two things the host owns:
 
 - **Headroom.** Each instance is bounded by 1 on its own, so four parts in
@@ -182,7 +254,12 @@ order the units are actually wired in `synth_render()`.
   pure function of phase; noise draws a random value each cycle and interpolates
   across it, so the note sets its bandwidth and a high one gives hi-hats. Each
   voice is seeded from its index, which keeps unison voices uncorrelated without
-  making a render unrepeatable.
+  making a render unrepeatable. Wave terrain is the one waveform whose settings
+  cost real work to derive — a lap of the orbit to find its mean and its peak,
+  since an arbitrary surface is neither centred nor bounded by 1, which is 21,545
+  instructions. So that derivation belongs to the instance rather than to the
+  voice, since it depends on the radius and the ratio and on nothing else, and it
+  does not happen at all unless the terrain is the selected waveform.
 - **Filter**: topology-preserving SVF, low/high/band-pass, with its own DAHDSR
   envelope and key tracking. Retuned every `SYNTH_MOD_INTERVAL` samples because
   recomputing coefficients costs far more than a sample of audio.
@@ -262,7 +339,7 @@ cmake --build build
 cd build && ctest --output-on-failure
 ```
 
-122 test functions, 298 assertions, no audio hardware needed. Spectra are
+130 test functions, 332 assertions, no audio hardware needed. Spectra are
 measured with a Goertzel probe at exact frequencies rather than asserted on the
 shape of the code, so the tests survive refactoring and catch real regressions.
 
@@ -297,10 +374,12 @@ Be honest about this line; a lot of it cannot be checked from a container.
 - **Cross-compiles and fits, but has never run**: bare metal ARM. CI builds the
   library and `backends/embedded/rp2040_example.c` for Cortex-M0+ and
   Cortex-M4F with `-Wconversion -Werror` and runs the dependency check on both.
-  Measured at 8 voices: 9.8 KB of flash and 5.0 KB of RAM on M0+, 9.0 KB and
-  5.0 KB on M4F, of which the delay line is 0.6 KB and 0.5 KB that a target
-  which does not link `src/delay.c` never pays. On an RP2040 that is 0.5% of
-  its flash and 1.9% of its SRAM, so memory is not the constraint.
+  Measured at 8 voices: 10.2 KB of flash and 5.1 KB of RAM on M0+, 9.4 KB and
+  5.1 KB on M4F. Two of those translation units are optional and a target that
+  leaves them out pays neither: the delay line is 0.6 KB and 0.5 KB of that
+  flash, and the patch queue 0.18 KB and 0.16 KB plus 288 bytes of RAM per track
+  for the two patches it holds. On an RP2040 the whole thing is 0.5% of its flash
+  and 1.9% of its SRAM, so memory is not the constraint.
 
   CPU is the constraint, and it is now measured rather than guessed.
   `tools/bench-arm/run.sh` renders a second of audio on QEMU's Cortex-M0 and

@@ -24,7 +24,8 @@ trap 'rm -rf "$out"' EXIT
 voices=${SYNTH_MAX_VOICES:-8}
 
 cc -O2 -DSYNTH_MAX_VOICES="$voices" -I"$root/include" \
-   "$here/block.c" "$root/src/dsp.c" "$root/src/synth.c" -o "$out/block"
+   "$here/block.c" "$root/src/dsp.c" "$root/src/synth.c" "$root/src/patch_queue.c" \
+   -o "$out/block"
 
 # 96 frames at 48 kHz is 2 ms; a 168 MHz Cortex-M4F has 336000 cycles in that.
 budget=336000
@@ -35,10 +36,13 @@ for case in "silent|nothing sounding" \
             "steady|8 voices, no events" \
             "param1|8 voices, one parameter change" \
             "param16|8 voices, 16 parameter changes" \
+            "param34|8 voices, every parameter as an event" \
+            "patch|8 voices, a whole patch adopted" \
             "notes8|8 voices, 8 notes starting" \
             "notes16|8 voices, 16 notes starting" \
             "mix4|4 instances mixed, 2 voices each" \
             "mix4full|4 instances mixed, every slot full" \
+            "mix4patch|4 instances, all four adopt a patch" \
             "mix4idle|4 instances mixed, all silent"; do
     name=${case%%|*}
     label=${case#*|}

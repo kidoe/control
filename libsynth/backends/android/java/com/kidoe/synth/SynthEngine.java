@@ -182,6 +182,50 @@ public final class SynthEngine {
 
     public static native float getParam(int track, int param);
 
+    /**
+     * Sends a whole patch to one track, to be adopted at the top of the next
+     * audio block. Returns false when the track's two-slot queue is still full,
+     * which takes three calls on the same track inside one block and is a signal
+     * to slow down rather than an error to ignore.
+     *
+     * <p>This is how a kit change should happen. The alternative — a
+     * {@link #setParam(int, int, float)} per parameter — puts
+     * {@link #paramCount()} events on that track's queue, and four tracks
+     * changing kit at once is 136 events against a queue of 64: the ones past
+     * the end are refused, so what the app gets is half a kit and no way to tell
+     * which half. A patch is one slot however many parameters it carries, and it
+     * arrives whole or not at all. It is also less work, though less
+     * dramatically than the queue argument suggests: on a 96-frame block with
+     * eight voices sounding, 240,760 instructions against 306,903 for the same
+     * change as 34 events.
+     *
+     * <p>The array is positional, exactly as {@link #savePatch(int)} returns it.
+     * A shorter one — a kit saved by a build with fewer parameters — is accepted
+     * and the rest take their defaults, which is the value that kit was
+     * implicitly using; an empty array therefore resets the track. Do not
+     * zero-fill the tail yourself: every bipolar control is neutral at its
+     * centre, so a zero would load full negative and a saved sound would come
+     * back four octaves down.
+     *
+     * <p>It lands on a block boundary rather than an exact frame, unlike
+     * {@link #scheduleParam(long, int, int, float)}. At 96 frames that is 2 ms.
+     * It also reaches the notes already sounding on that track, so a kit change
+     * under a decaying note re-voices it: change kits between steps.
+     */
+    public static native boolean loadPatch(int track, float[] patch);
+
+    /**
+     * One track's sound as a plain float array, or null for a track that does
+     * not exist. A snapshot read off the audio thread's parameters, which is
+     * what the engine is playing now — not a patch sent with
+     * {@link #loadPatch(int, float[])} and not yet adopted.
+     *
+     * <p>Positional and tied to this build's parameter list. To survive a
+     * version change, store {@link #paramName(int)} beside each value and match
+     * on the names when loading.
+     */
+    public static native float[] savePatch(int track);
+
     /** Number of parameters the core exposes, for building UI generically. */
     public static native int paramCount();
 

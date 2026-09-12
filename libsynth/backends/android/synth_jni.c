@@ -26,6 +26,12 @@
 typedef char synth_tracks_must_be_at_least_one[(SYNTH_TRACKS >= 1) ? 1 : -1];
 
 static synth_t g_tracks[SYNTH_TRACKS];
+
+/* A whole patch will not fit in a synth_event_t, so a kit change from the UI
+   thread comes through here instead. One queue per track, drained by the audio
+   callback; see synth.h for the two-slot handoff it is. */
+static synth_patch_queue_t g_patches[SYNTH_TRACKS];
+
 static AAudioStream *g_stream;
 static int g_channels = 1;
 
@@ -47,6 +53,13 @@ static aaudio_data_callback_result_t audio_callback(AAudioStream *stream, void *
 
     (void)stream;
     (void)user_data;
+
+    /* Kits first, and all of them before any audio: a patch waiting for a track
+       has to be in place before that track renders a sample of this block, or
+       the change is heard one block late. */
+    for (track = 0; track < SYNTH_TRACKS; ++track) {
+        synth_patch_apply(&g_patches[track], &g_tracks[track]);
+    }
 
     /* The first track writes and the rest add, so the mix needs no scratch
        buffer and no clearing of this one. Every track renders, silent ones
@@ -98,6 +111,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved)
        ahead of start() are never applied to uninitialised memory. */
     for (track = 0; track < SYNTH_TRACKS; ++track) {
         synth_init(&g_tracks[track], 48000.0f);
+        synth_patch_queue_init(&g_patches[track]);
     }
     return JNI_VERSION_1_6;
 }
@@ -335,6 +349,54 @@ JNIEXPORT jfloat JNICALL Java_com_kidoe_synth_SynthEngine_getParam(JNIEnv *env, 
     (void)clazz;
 
     return s ? (jfloat)synth_get_param(s, (synth_param_t)param) : 0.0f;
+}
+
+/* A patch is copied twice on the way in — once out of the Java array, once into
+   the queue's slot — which is 136 bytes each on a thread with time to spare, and
+   buys not having to hand the engine a pointer into the JVM's heap. */
+JNIEXPORT jboolean JNICALL Java_com_kidoe_synth_SynthEngine_loadPatch(JNIEnv *env, jclass clazz,
+                                                                      jint track, jfloatArray patch)
+{
+    float values[SYNTH_PARAM_COUNT];
+    jsize count;
+
+    (void)clazz;
+
+    if (track < 0 || track >= SYNTH_TRACKS || !patch) {
+        return JNI_FALSE;
+    }
+    count = (*env)->GetArrayLength(env, patch);
+    if (count > (jsize)SYNTH_PARAM_COUNT) {
+        count = (jsize)SYNTH_PARAM_COUNT; /* saved by a build with more of them */
+    }
+    if (count > 0) {
+        (*env)->GetFloatArrayRegion(env, patch, 0, count, values);
+    }
+    return synth_patch_send(&g_patches[track], values, (int)count) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jfloatArray JNICALL Java_com_kidoe_synth_SynthEngine_savePatch(JNIEnv *env, jclass clazz,
+                                                                        jint track)
+{
+    const synth_t *s = track_at(track);
+    float values[SYNTH_PARAM_COUNT];
+    jfloatArray out;
+
+    (void)clazz;
+
+    if (!s) {
+        return 0;
+    }
+    /* Reads parameters the audio thread owns, like getParam does: each one is a
+       single aligned float, so the answer is a snapshot that may be a block old
+       rather than a mixture of two patches. A patch sent and not yet applied is
+       not in it — what comes back is what the engine is playing. */
+    synth_save_patch(s, values);
+    out = (*env)->NewFloatArray(env, (jsize)SYNTH_PARAM_COUNT);
+    if (out) {
+        (*env)->SetFloatArrayRegion(env, out, 0, (jsize)SYNTH_PARAM_COUNT, values);
+    }
+    return out;
 }
 
 JNIEXPORT jint JNICALL Java_com_kidoe_synth_SynthEngine_paramCount(JNIEnv *env, jclass clazz)
