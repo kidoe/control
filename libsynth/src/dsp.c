@@ -83,31 +83,40 @@ static void terrain_point(const synth_osc_t *osc, float phase, float *x, float *
 
 /* An arbitrary surface has no reason to be centred or to peak at 1, and both
    depend on the orbit. Walking one lap at setup time is cheaper than guessing,
-   and keeps this waveform as well behaved as the others. */
+   and keeps this waveform as well behaved as the others.
+
+   One lap, not two. The mean is not known until the lap ends, so finding the
+   largest |z - dc| looks like it needs a second pass — but that maximum is
+   reached at an extreme of z, so the two extremes are all the second pass would
+   have been looking for, and they cost a comparison each on the way past. */
 static void terrain_update(synth_osc_t *osc)
 {
     const int steps = 256;
     float sum = 0.0f;
-    float peak = 0.0f;
+    float lowest = 0.0f;
+    float highest = 0.0f;
+    float peak;
+    float above;
+    float below;
     float x, y, z;
     int i;
 
     for (i = 0; i < steps; ++i) {
         terrain_point(osc, (float)i / (float)steps, &x, &y);
-        sum += terrain_height(x, y);
+        z = terrain_height(x, y);
+        sum += z;
+        if (i == 0 || z < lowest) {
+            lowest = z;
+        }
+        if (i == 0 || z > highest) {
+            highest = z;
+        }
     }
     osc->terrain_dc = sum / (float)steps;
 
-    for (i = 0; i < steps; ++i) {
-        terrain_point(osc, (float)i / (float)steps, &x, &y);
-        z = terrain_height(x, y) - osc->terrain_dc;
-        if (z < 0.0f) {
-            z = -z;
-        }
-        if (z > peak) {
-            peak = z;
-        }
-    }
+    above = highest - osc->terrain_dc;
+    below = osc->terrain_dc - lowest;
+    peak = (above > below) ? above : below;
     osc->terrain_scale = (peak > 1e-6f) ? 1.0f / peak : 0.0f;
 }
 
@@ -306,6 +315,18 @@ void synth_osc_set_terrain(synth_osc_t *osc, float radius, int ratio)
     osc->terrain_radius = radius;
     osc->terrain_ratio = ratio;
     terrain_update(osc);
+}
+
+void synth_osc_share_terrain(synth_osc_t *osc, const synth_osc_t *from)
+{
+    if (osc->terrain_radius == from->terrain_radius
+        && osc->terrain_ratio == from->terrain_ratio) {
+        return;
+    }
+    osc->terrain_radius = from->terrain_radius;
+    osc->terrain_ratio = from->terrain_ratio;
+    osc->terrain_scale = from->terrain_scale;
+    osc->terrain_dc = from->terrain_dc;
 }
 
 float synth_osc_next(synth_osc_t *osc)

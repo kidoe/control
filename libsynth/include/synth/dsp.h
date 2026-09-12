@@ -72,6 +72,13 @@ void  synth_osc_set_pd_knee(synth_osc_t *osc, float knee);
 void  synth_osc_set_vosim(synth_osc_t *osc, float formant_hz, int pulses, float decay);
 void  synth_osc_set_terrain(synth_osc_t *osc, float radius, int ratio);
 
+/* Takes the cross-section another oscillator has already derived. Walking the
+   orbit depends on nothing but the radius and the ratio, so voices that share
+   those two numbers — every voice of one instance does — can share the answer
+   instead of each computing it. Walking it once per voice cost a whole audio
+   deadline every time either control moved. */
+void  synth_osc_share_terrain(synth_osc_t *osc, const synth_osc_t *from);
+
 /* Decorrelates the noise between voices. Any non-zero value will do; the engine
    seeds each voice from its index so a patch still renders identically twice. */
 void  synth_osc_set_noise_seed(synth_osc_t *osc, unsigned seed);

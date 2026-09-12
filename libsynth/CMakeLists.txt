@@ -13,6 +13,7 @@ add_library(synth STATIC
     src/delay.c
     src/dsp.c
     src/midi.c
+    src/patch_queue.c
     src/synth.c
 )
 

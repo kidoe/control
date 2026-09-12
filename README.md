@@ -88,6 +88,19 @@ synth_schedule(&synth, &e);          /* safe from a UI or sequencer thread */
 It returns 0 when the fixed-size queue is full, which is a signal to schedule
 less far ahead, not an error to ignore.
 
+A whole patch does not fit in an event — it is an array, not a float — so
+changing a track's sound from the UI thread has its own channel, two slots deep
+and lock-free like the other one:
+
+```c
+synth_patch_send(&queue, patch, count);   /* UI thread: copies the array */
+synth_patch_apply(&queue, &synth);        /* audio thread, before rendering */
+```
+
+Sending it one parameter at a time instead is 34 events per track, so four tracks
+changing kit at once is 136 against a queue of 64: the app gets half a kit. This
+way it arrives whole or not at all, and costs 22% less work besides.
+
 `synth_render()` splits its block at those frame offsets, so a sequencer step
 lands on its own frame rather than on the buffer boundary. A block also has a
 deadline — 96 frames at 48 kHz is 2 ms — so what a *busy* block costs is
@@ -130,7 +143,7 @@ instance starts at frame zero, so a part created mid-session needs
 | | how | state |
 |---|---|---|
 | Desktop | miniaudio, `backends/pc/` | builds in CI, never run — no sound card there |
-| Android | AAudio through JNI, `backends/android/`, four tracks mixed | reported working on hardware at 48 kHz; CI diffs every JNI signature against `javac -h` and compiles the bridge |
+| Android | AAudio through JNI, `backends/android/`, four tracks mixed, kits per track | reported working on hardware at 48 kHz; CI diffs every JNI signature against `javac -h` and compiles the bridge |
 | Bare metal | `backends/embedded/rp2040_example.c` | cross-builds and fits; see below |
 
 The Android side is a contract, not a suggestion:
@@ -168,7 +181,7 @@ program; CI tests 4, 8 and 32.
 The point of this library is portability, so the claims about it are measured
 rather than asserted, and the ones that are not are labelled.
 
-- **Verified here**: the core and its 122 tests, under gcc and clang with
+- **Verified here**: the core and its 129 tests, under gcc and clang with
   `-Wconversion -Werror`, at three voice counts, with the headers compiled as
   C++ and with parameter names stripped. Spectra are measured with a Goertzel
   probe at exact frequencies rather than asserted on the shape of the code, and
@@ -197,8 +210,9 @@ rather than asserted, and the ones that are not are labelled.
 ```
 libsynth/
   include/synth/   config.h, dsp.h, synth.h, midi.h — the public surface
-  src/             dsp.c (units), synth.c (engine), midi.c and delay.c, each
-                   its own translation unit so a target can leave it out
+  src/             dsp.c (units), synth.c (engine), then midi.c, delay.c and
+                   patch_queue.c, each its own translation unit so a target can
+                   leave it out
   tests/           one host suite, no audio hardware needed
   backends/        pc, android, embedded
   examples/        render_wav, and the demo sequencer both players share

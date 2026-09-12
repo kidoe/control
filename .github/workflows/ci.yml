@@ -13,8 +13,11 @@ jobs:
       matrix:
         compiler: [gcc, clang]
         # Polyphony is a compile-time constant, so each build is a different
-        # program and each one has to be tested.
-        voices: [4, 8, 32]
+        # program and each one has to be tested. One voice is in the list because
+        # a voice per track is a configuration this library recommends, and it
+        # was quietly broken: six assertions expected a chord to fit in a pool
+        # that could not hold it.
+        voices: [1, 4, 8, 32]
     steps:
       - uses: actions/checkout@v4
 
@@ -107,7 +110,7 @@ jobs:
                         "-mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16"; do
             echo "=== $target ==="
             rm -rf arm-build && mkdir arm-build
-            for unit in dsp synth midi delay; do
+            for unit in dsp synth midi delay patch_queue; do
               arm-none-eabi-gcc $target -Os -std=c11 \
                 -Wall -Wextra -Wpedantic -Wconversion -Werror \
                 -Ilibsynth/include -c libsynth/src/$unit.c -o arm-build/$unit.o

@@ -27,6 +27,16 @@ static int g_failures;
 
 #define SR 44100.0f
 
+/* A pool smaller than the chord steals voices, so what has to be sounding is
+   the chord or the pool, whichever is smaller. Written out this way the
+   voice-count assertions still mean something at SYNTH_MAX_VOICES=1 — a voice
+   per track is a configuration this library recommends — rather than simply
+   failing there. */
+static int at_most_pool(int wanted)
+{
+    return (wanted < SYNTH_MAX_VOICES) ? wanted : SYNTH_MAX_VOICES;
+}
+
 static float peak(const float *buf, int n)
 {
     float p = 0.0f;
@@ -39,6 +49,26 @@ static float peak(const float *buf, int n)
         }
     }
     return p;
+}
+
+/* Two engines the same sound: what they render has to be bit-identical, not
+   close. Both are advanced, so this consumes state — call it last. */
+static int rendered_is_identical(synth_t *a, synth_t *b, int frames)
+{
+    static float ba[512], bb[512];
+    int i;
+
+    if (frames > 512) {
+        frames = 512;
+    }
+    synth_render(a, ba, frames);
+    synth_render(b, bb, frames);
+    for (i = 0; i < frames; ++i) {
+        if (ba[i] != bb[i]) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static void render_seconds(synth_t *s, float *buf, int cap, float seconds)
@@ -463,6 +493,38 @@ static void test_terrain_radius_changes_the_spectrum(void)
         wide_high += goertzel(wide, ALIAS_FRAMES, 200.0f * (float)i);
     }
     CHECK(wide_high > narrow_high * 1.5f);
+}
+
+/* Every voice of an instance orbits the same cross-section, so deriving it once
+   and copying it has to leave every voice with exactly what deriving it in place
+   would have. Not "close": the same floats, or the voices are detuned from each
+   other in a way no spectrum test would separate from the waveform itself. */
+static void test_every_voice_shares_one_terrain_cross_section(void)
+{
+    synth_t s;
+    synth_osc_t reference;
+    int round, i;
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_OSC_WAVE,
+                    (float)SYNTH_WAVE_TERRAIN / (float)(SYNTH_WAVE_COUNT - 1));
+    synth_osc_init(&reference, SR);
+
+    /* Twice, with different values: a voice left holding the first answer would
+       pass a single round. */
+    for (round = 0; round < 2; ++round) {
+        synth_set_param(&s, SYNTH_PARAM_TERRAIN_RADIUS, round ? 0.25f : 0.85f);
+        synth_set_param(&s, SYNTH_PARAM_TERRAIN_RATIO, round ? 0.9f : 0.3f);
+
+        synth_osc_set_terrain(&reference, s.voices[0].osc.terrain_radius,
+                              s.voices[0].osc.terrain_ratio);
+        for (i = 0; i < SYNTH_MAX_VOICES; ++i) {
+            CHECK(s.voices[i].osc.terrain_radius == reference.terrain_radius);
+            CHECK(s.voices[i].osc.terrain_ratio == reference.terrain_ratio);
+            CHECK(s.voices[i].osc.terrain_scale == reference.terrain_scale);
+            CHECK(s.voices[i].osc.terrain_dc == reference.terrain_dc);
+        }
+    }
 }
 
 static void test_terrain_ratio_changes_the_waveform(void)
@@ -1138,7 +1200,7 @@ static void test_all_notes_off(void)
         synth_note_on(&s, 60 + i, 1.0f);
     }
     synth_render(&s, buf, 64);
-    CHECK(synth_active_voices(&s) == 4);
+    CHECK(synth_active_voices(&s) == at_most_pool(4));
 
     synth_all_notes_off(&s);
     render_seconds(&s, buf, 64, 1.5f);
@@ -1356,7 +1418,7 @@ static void test_midi_running_status(void)
     synth_init(&s, SR);
     CHECK(feed_bytes(&midi, &s, stream, 7) == 3);
     synth_render(&s, buf, 64);
-    CHECK(synth_active_voices(&s) == 3);
+    CHECK(synth_active_voices(&s) == at_most_pool(3));
 }
 
 static void test_midi_realtime_bytes_do_not_break_a_message(void)
@@ -1372,7 +1434,7 @@ static void test_midi_realtime_bytes_do_not_break_a_message(void)
     synth_init(&s, SR);
     CHECK(feed_bytes(&midi, &s, stream, 8) == 2);
     synth_render(&s, buf, 64);
-    CHECK(synth_active_voices(&s) == 2);
+    CHECK(synth_active_voices(&s) == at_most_pool(2));
 }
 
 static void test_midi_sysex_is_skipped_and_cancels_running_status(void)
@@ -1457,7 +1519,7 @@ static void test_midi_all_notes_off_works_whatever_the_map(void)
     synth_init(&s, SR);
     feed_bytes(&midi, &s, notes, 5);
     synth_render(&s, buf, 64);
-    CHECK(synth_active_voices(&s) == 2);
+    CHECK(synth_active_voices(&s) == at_most_pool(2));
 
     feed_bytes(&midi, &s, panic, 3);
     render_seconds(&s, buf, 64, 1.5f);
@@ -1607,7 +1669,7 @@ static void test_several_events_split_one_block(void)
     schedule_note_on(&s, 450, 67, 1.0f);
 
     synth_render(&s, buf, 512);
-    CHECK(synth_active_voices(&s) == 3);
+    CHECK(synth_active_voices(&s) == at_most_pool(3));
     CHECK(first_onset(buf, 512) >= 100);
 
     /* And nothing sounded before the first event. */
@@ -1623,8 +1685,8 @@ static void test_several_events_split_one_block(void)
     voices_at_100 = synth_active_voices(&s);
     synth_render(&s, buf, 200);
     voices_at_400 = synth_active_voices(&s);
-    CHECK(voices_at_100 == 1);
-    CHECK(voices_at_400 == 2);
+    CHECK(voices_at_100 == at_most_pool(1));
+    CHECK(voices_at_400 == at_most_pool(2));
 }
 
 static void test_late_event_is_played_not_dropped(void)
@@ -2687,6 +2749,177 @@ static void test_a_short_patch_loads_at_its_defaults(void)
     CHECK(synth_get_param(&s, SYNTH_PARAM_PITCH_ENV_AMOUNT) < 0.5f);
 }
 
+/* Filling a patch with something distinguishable from the defaults, and not
+   with 1.0f everywhere, which would make a stepped parameter land on its last
+   value and a bipolar one on its extreme. */
+static void fill_patch(float *patch, float value)
+{
+    int i;
+
+    for (i = 0; i < SYNTH_PARAM_COUNT; ++i) {
+        patch[i] = value;
+    }
+}
+
+/* Everything a patch load touches, and nothing else. Not the whole synth_t: the
+   event queue's unused slots are never written by anyone — synth_init does not
+   clear them either, and nothing reads one the indices do not cover — so two
+   engines that agree completely still differ there by whatever was on the
+   stack. */
+static int same_sound(const synth_t *a, const synth_t *b)
+{
+    return memcmp(a->params, b->params, sizeof a->params) == 0
+           && memcmp(a->voices, b->voices, sizeof a->voices) == 0
+           && a->last_note == b->last_note;
+}
+
+static void test_a_sent_patch_loads_exactly_as_a_direct_load(void)
+{
+    synth_t a, b;
+    synth_patch_queue_t q;
+    float patch[SYNTH_PARAM_COUNT];
+
+    fill_patch(patch, 0.3f);
+    synth_init(&a, SR);
+    synth_init(&b, SR);
+    synth_note_on(&a, 60, 1.0f);
+    synth_note_on(&b, 60, 1.0f);
+
+    synth_load_patch(&a, patch);
+
+    synth_patch_queue_init(&q);
+    CHECK(synth_patch_send(&q, patch, SYNTH_PARAM_COUNT) == 1);
+    CHECK(synth_patch_apply(&q, &b) == 1);
+
+    /* Every voice, not just the parameters: going through the queue must not be
+       a different way of loading a patch, only a different thread. */
+    CHECK(same_sound(&a, &b));
+    CHECK(rendered_is_identical(&a, &b, 256));
+}
+
+static void test_applying_nothing_leaves_the_engine_alone(void)
+{
+    synth_t a, b;
+    synth_patch_queue_t q;
+
+    synth_init(&a, SR);
+    synth_init(&b, SR);
+    synth_note_on(&a, 60, 1.0f);
+    synth_note_on(&b, 60, 1.0f);
+
+    synth_patch_queue_init(&q);
+    CHECK(synth_patch_apply(&q, &b) == 0);
+    CHECK(same_sound(&a, &b));
+}
+
+/* Two patches waiting in the same block: the first is never heard, so applying
+   only the second has to leave exactly what applying both would. */
+static void test_two_waiting_patches_collapse_to_the_newer(void)
+{
+    synth_t a, b;
+    synth_patch_queue_t q;
+    float first[SYNTH_PARAM_COUNT], second[SYNTH_PARAM_COUNT];
+
+    fill_patch(first, 0.2f);
+    fill_patch(second, 0.7f);
+    synth_init(&a, SR);
+    synth_init(&b, SR);
+
+    synth_load_patch(&a, first);
+    synth_load_patch(&a, second);
+
+    synth_patch_queue_init(&q);
+    CHECK(synth_patch_send(&q, first, SYNTH_PARAM_COUNT) == 1);
+    CHECK(synth_patch_send(&q, second, SYNTH_PARAM_COUNT) == 1);
+    CHECK(synth_patch_apply(&q, &b) == 1);
+    CHECK(same_sound(&a, &b));
+    CHECK(rendered_is_identical(&a, &b, 256));
+
+    /* And the queue is empty afterwards, both slots free again. */
+    CHECK(synth_patch_apply(&q, &b) == 0);
+    CHECK(synth_patch_send(&q, first, SYNTH_PARAM_COUNT) == 1);
+    CHECK(synth_patch_send(&q, first, SYNTH_PARAM_COUNT) == 1);
+}
+
+/* Three sends between two renders is the one case the two slots cannot take.
+   Refusing keeps the slot the reader may be reading intact; the alternative is a
+   patch torn down the middle, which would be a sound nobody asked for. */
+static void test_a_third_patch_in_one_block_is_refused(void)
+{
+    synth_t a, b;
+    synth_patch_queue_t q;
+    float first[SYNTH_PARAM_COUNT], second[SYNTH_PARAM_COUNT], third[SYNTH_PARAM_COUNT];
+
+    fill_patch(first, 0.2f);
+    fill_patch(second, 0.7f);
+    fill_patch(third, 0.9f);
+    synth_init(&a, SR);
+    synth_init(&b, SR);
+    synth_load_patch(&a, second);
+
+    synth_patch_queue_init(&q);
+    CHECK(synth_patch_send(&q, first, SYNTH_PARAM_COUNT) == 1);
+    CHECK(synth_patch_send(&q, second, SYNTH_PARAM_COUNT) == 1);
+    CHECK(synth_patch_send(&q, third, SYNTH_PARAM_COUNT) == 0);
+
+    /* What arrives is the second, not the third: the refusal is honest about
+       having dropped it rather than quietly keeping the newest. */
+    CHECK(synth_patch_apply(&q, &b) == 1);
+    CHECK(same_sound(&a, &b));
+}
+
+static void test_a_short_patch_through_the_queue_takes_the_defaults(void)
+{
+    synth_t a, b;
+    synth_patch_queue_t q;
+    float patch[SYNTH_PARAM_COUNT];
+    int older = SYNTH_PARAM_PITCH_ENV_AMOUNT;
+
+    fill_patch(patch, 0.4f);
+    synth_init(&a, SR);
+    synth_init(&b, SR);
+    synth_load_patch_n(&a, patch, older);
+
+    synth_patch_queue_init(&q);
+    CHECK(synth_patch_send(&q, patch, older) == 1);
+    CHECK(synth_patch_apply(&q, &b) == 1);
+    CHECK(same_sound(&a, &b));
+    CHECK_NEAR(synth_get_param(&b, SYNTH_PARAM_PITCH_ENV_AMOUNT), 0.5f, 1e-6f);
+
+    /* An empty send is the same thing taken to its limit: every default, which
+       is how a host resets a track. Compared against the same history rather
+       than against a fresh instance — loading a patch tunes the oscillator, so
+       a synth_init that has never seen a note keeps a phase increment of zero
+       where this one has one, which is a difference no note_on survives. */
+    synth_load_patch_n(&a, patch, 0);
+    CHECK(synth_patch_send(&q, patch, 0) == 1);
+    CHECK(synth_patch_apply(&q, &b) == 1);
+    CHECK(same_sound(&a, &b));
+    CHECK_NEAR(synth_get_param(&b, SYNTH_PARAM_AMP_ATTACK),
+               synth_get_param(&a, SYNTH_PARAM_AMP_ATTACK), 1e-6f);
+}
+
+/* The indices are unsigned and compared by difference, so the queue has to keep
+   working when they wrap rather than jamming after four billion patches. */
+static void test_the_patch_queue_survives_its_counters_wrapping(void)
+{
+    synth_t s;
+    synth_patch_queue_t q;
+    float patch[SYNTH_PARAM_COUNT];
+    int i;
+
+    fill_patch(patch, 0.5f);
+    synth_init(&s, SR);
+    synth_patch_queue_init(&q);
+    q.produced = 0xFFFFFFFEu;
+    q.consumed = 0xFFFFFFFEu;
+
+    for (i = 0; i < 8; ++i) {
+        CHECK(synth_patch_send(&q, patch, SYNTH_PARAM_COUNT) == 1);
+        CHECK(synth_patch_apply(&q, &s) == 1);
+    }
+}
+
 /* Striking the same note again reuses its voice, so the sweep has to start over
    rather than carry on from wherever the last one had fallen to. */
 static void test_pitch_env_restarts_on_a_retrigger(void)
@@ -3043,6 +3276,7 @@ static void test_no_glide_by_default(void)
 
 /* Each voice carries its own travel, so a chord built one note at a time does
    not drag the notes already in it. */
+#if SYNTH_MAX_VOICES > 1
 static void test_a_glide_belongs_to_its_own_voice(void)
 {
     synth_t s;
@@ -3062,6 +3296,7 @@ static void test_a_glide_belongs_to_its_own_voice(void)
     render_seconds(&s, buf, 512, 2.0f);
     CHECK(s.voices[1].glide == 0.0f);     /* and it arrives */
 }
+#endif
 
 /* The delay line. The buffer is the caller's, so these tests declare it the way
    an MCU would. */
@@ -3324,6 +3559,7 @@ int main(void)
     test_vosim_pulses_cannot_overflow_the_period();
     test_terrain_is_centred_and_bounded();
     test_terrain_radius_changes_the_spectrum();
+    test_every_voice_shares_one_terrain_cross_section();
     test_terrain_ratio_changes_the_waveform();
     test_filter_env_opens_and_closes_the_filter();
     test_filter_env_amount_is_bipolar();
@@ -3407,6 +3643,12 @@ int main(void)
     test_pitch_env_defaults_change_nothing();
     test_new_parameters_are_appended();
     test_a_short_patch_loads_at_its_defaults();
+    test_a_sent_patch_loads_exactly_as_a_direct_load();
+    test_applying_nothing_leaves_the_engine_alone();
+    test_two_waiting_patches_collapse_to_the_newer();
+    test_a_third_patch_in_one_block_is_refused();
+    test_a_short_patch_through_the_queue_takes_the_defaults();
+    test_the_patch_queue_survives_its_counters_wrapping();
     test_pitch_env_restarts_on_a_retrigger();
     test_centring_the_amount_puts_the_note_back();
     test_a_modulation_nothing_hears_changes_nothing();
@@ -3418,7 +3660,9 @@ int main(void)
     test_glide_starts_a_note_on_the_previous_pitch();
     test_glide_time_sets_how_long_the_travel_takes();
     test_no_glide_by_default();
+#if SYNTH_MAX_VOICES > 1
     test_a_glide_belongs_to_its_own_voice();
+#endif
     test_delay_repeats_after_its_time();
     test_delay_feedback_decays();
     test_delay_is_transparent_at_zero_mix();

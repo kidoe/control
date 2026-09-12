@@ -23,7 +23,9 @@
 
 static synth_t s;
 static synth_t tracks[TRACKS];
+static synth_patch_queue_t queues[TRACKS];
 static float buf[96];
+static float patch[SYNTH_PARAM_COUNT];
 
 static void schedule(synth_event_type_t type, uint64_t frame, int index, float value)
 {
@@ -42,6 +44,9 @@ static void render_mix(int n_tracks)
 {
     int t;
 
+    for (t = 0; t < n_tracks; ++t) {
+        synth_patch_apply(&queues[t], &tracks[t]);
+    }
     synth_render(&tracks[0], buf, 96);
     for (t = 1; t < n_tracks; ++t) {
         synth_render_add(&tracks[t], buf, 96);
@@ -51,6 +56,7 @@ static void render_mix(int n_tracks)
 static int run_mix(const char *what)
 {
     int voices_each = 2;
+    int kits = (strcmp(what, "mix4patch") == 0);
 
     if (strcmp(what, "mix4idle") == 0) {
         voices_each = 0;
@@ -61,6 +67,7 @@ static int run_mix(const char *what)
 
     for (t = 0; t < TRACKS; ++t) {
         synth_init(&tracks[t], 48000.0f);
+        synth_patch_queue_init(&queues[t]);
         synth_set_param(&tracks[t], SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
         for (i = 0; i < voices_each; ++i) {
             synth_note_on(&tracks[t], 32 + t * 3 + i * 2, 0.9f);
@@ -68,6 +75,16 @@ static int run_mix(const char *what)
     }
     for (i = 0; i < 50; ++i) {
         render_mix(TRACKS);
+    }
+    if (kits) {
+        /* Four tracks changing kit in the same block, which is one pad press on
+           a groovebox. Every parameter moves, as a real kit change does. */
+        for (i = 0; i < SYNTH_PARAM_COUNT; ++i) {
+            patch[i] = 0.45f;
+        }
+        for (t = 0; t < TRACKS; ++t) {
+            synth_patch_send(&queues[t], patch, SYNTH_PARAM_COUNT);
+        }
     }
 
     CALLGRIND_START_INSTRUMENTATION;
@@ -89,6 +106,7 @@ int main(int argc, char **argv)
     }
 
     synth_init(&s, 48000.0f);
+    synth_patch_queue_init(&queues[0]);
     synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
 
     if (strcmp(what, "silent") != 0) {
@@ -111,6 +129,27 @@ int main(int argc, char **argv)
         }
     } else if (strcmp(what, "param1") == 0) {
         schedule(SYNTH_EVENT_PARAM, now + 40u, SYNTH_PARAM_FILTER_CUTOFF, 0.6f);
+    } else if (strcmp(what, "param34") == 0) {
+        /* One event per parameter, all on the same frame: what loading a kit
+           costs without a patch queue to carry the whole thing at once. */
+        for (i = 0; i < SYNTH_PARAM_COUNT; ++i) {
+            schedule(SYNTH_EVENT_PARAM, now + 8u, i, 0.45f);
+        }
+    } else if (strcmp(what, "param34spread") == 0) {
+        /* Not in run.sh's table: measured at 280,671 against param34's 306,903,
+           so spreading the same events over the block rather than landing them
+           together changes nothing worth a row. */
+        for (i = 0; i < SYNTH_PARAM_COUNT; ++i) {
+            schedule(SYNTH_EVENT_PARAM, now + (uint64_t)(i * 2), i, 0.45f);
+        }
+    } else if (strcmp(what, "patch") == 0) {
+        /* The same destination as the param34 cases, so the two rows differ only
+           in how the change travels: every parameter moved, not just the ones a
+           patch happens to share with the current sound. */
+        for (i = 0; i < SYNTH_PARAM_COUNT; ++i) {
+            patch[i] = 0.45f;
+        }
+        synth_patch_send(&queues[0], patch, SYNTH_PARAM_COUNT);
     } else if (strcmp(what, "param16") == 0) {
         /* A knob being moved, or one bar of parameter automation arriving at
            once: the case a groovebox hits constantly. */
@@ -121,6 +160,7 @@ int main(int argc, char **argv)
     }
 
     CALLGRIND_START_INSTRUMENTATION;
+    synth_patch_apply(&queues[0], &s); /* a no-op in every case but "patch" */
     synth_render(&s, buf, 96);
     CALLGRIND_STOP_INSTRUMENTATION;
 

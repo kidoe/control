@@ -155,9 +155,20 @@ static void voice_apply_osc(synth_t *s, synth_voice_t *v)
                         synth_param_denorm(SYNTH_PARAM_VOSIM_FORMANT, s->params[SYNTH_PARAM_VOSIM_FORMANT]),
                         (int)synth_param_denorm(SYNTH_PARAM_VOSIM_PULSES, s->params[SYNTH_PARAM_VOSIM_PULSES]),
                         synth_param_denorm(SYNTH_PARAM_VOSIM_DECAY, s->params[SYNTH_PARAM_VOSIM_DECAY]));
-    synth_osc_set_terrain(&v->osc,
-                          synth_param_denorm(SYNTH_PARAM_TERRAIN_RADIUS, s->params[SYNTH_PARAM_TERRAIN_RADIUS]),
-                          (int)synth_param_denorm(SYNTH_PARAM_TERRAIN_RATIO, s->params[SYNTH_PARAM_TERRAIN_RATIO]));
+    /* One voice walks the terrain orbit and the others copy what it found. The
+       cross-section depends on the radius and the ratio and on nothing else, so
+       deriving it per voice was the same answer computed SYNTH_MAX_VOICES times:
+       328,000 instructions for one move of either control, which is a whole 2 ms
+       deadline on an M4F. Voice 0 is the one that derives, because every path
+       that reaches here has already brought it up to date — a parameter change
+       applies to every voice in order, and so does a patch load. */
+    if (v == &s->voices[0]) {
+        synth_osc_set_terrain(&v->osc,
+                              synth_param_denorm(SYNTH_PARAM_TERRAIN_RADIUS, s->params[SYNTH_PARAM_TERRAIN_RADIUS]),
+                              (int)synth_param_denorm(SYNTH_PARAM_TERRAIN_RATIO, s->params[SYNTH_PARAM_TERRAIN_RATIO]));
+    } else {
+        synth_osc_share_terrain(&v->osc, &s->voices[0].osc);
+    }
 }
 
 /* Tremolo dips from the level rather than lifting past it, so turning the depth
