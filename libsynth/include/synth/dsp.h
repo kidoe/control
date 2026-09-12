@@ -67,6 +67,14 @@ typedef struct {
 
 void  synth_osc_init(synth_osc_t *osc, float sample_rate);
 void  synth_osc_reset(synth_osc_t *osc); /* phase only, keeps tuning and timbre */
+/* Selects the waveform, and derives whatever that waveform needs. Assigning
+   `osc->wave` directly is not the same thing and will sound wrong: the phase
+   distortion's warp and the VOSIM pulse layout are derived from the pitch and
+   from their own controls, and each is computed only while its waveform is the
+   one selected — a sine pays for neither. Switching is what brings the new
+   waveform's derivation up to date. */
+void  synth_osc_set_wave(synth_osc_t *osc, synth_wave_t wave);
+
 void  synth_osc_set_freq(synth_osc_t *osc, float hz);
 void  synth_osc_set_pd_knee(synth_osc_t *osc, float knee);
 void  synth_osc_set_vosim(synth_osc_t *osc, float formant_hz, int pulses, float decay);
