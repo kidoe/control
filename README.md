@@ -3,7 +3,7 @@
 A polyphonic synthesis core in C11 that runs from the same source on a desktop,
 on a microcontroller, and on Android.
 
-It is small — 7.6 KB of code and 4.6 KB of RAM at eight voices on a Cortex-M4F —
+It is small — 9.0 KB of code and 5.0 KB of RAM at eight voices on a Cortex-M4F —
 because it has no dependencies at all. No libm, no malloc, no threads, no OS. Pitch, curves, sine,
 tangent and exponentials are arithmetic; the caller owns the memory; the audio
 callback calls one function.
@@ -52,8 +52,21 @@ and the order the units are wired in `synth_render()`.
 - **Pitch envelope** — attack and decay, in octaves. This is what makes
   percussion possible: a sine falling an octave and a half onto a low note in
   forty milliseconds is a kick drum; the same note without the sweep is a beep.
+- **Glide** — portamento, in seconds. A note starts on the pitch of the one
+  before it and travels; each voice carries its own, so a chord built one note
+  at a time does not drag the notes already in it.
 - **Amplifier** — per-note level, velocity sensitivity, and a soft saturation
   that is exactly the identity when the drive is zero.
+
+A delay line lives outside the engine, in `src/delay.c`, with its buffer owned
+by the caller: a groovebox puts one echo on a track or one on the whole mix, and
+which of those it wants is not the library's decision. Nothing in the core
+refers to it, so a target that does not want an echo never links it.
+
+Every modulation depth is bipolar and neutral at its centre, and the engine does
+not compute one that reaches nothing: a patch that has not asked for an
+envelope, an LFO or a sweep does not pay for it, which is 43% of the render loop
+on a Cortex-M4F.
 
 Everything is driven through parameters normalized to `[0, 1]`, with range,
 curve and name in a descriptor table, so a MIDI CC, an ADC reading and a UI
@@ -72,10 +85,15 @@ synth_event_t e = { synth_frame_time(&synth) + 4800,
 synth_schedule(&synth, &e);          /* safe from a UI or sequencer thread */
 ```
 
+It returns 0 when the fixed-size queue is full, which is a signal to schedule
+less far ahead, not an error to ignore.
+
 `synth_render()` splits its block at those frame offsets, so a sequencer step
-lands on its own frame rather than on the buffer boundary. It returns 0 when the
-fixed-size queue is full, which is a signal to schedule less far ahead, not an
-error to ignore.
+lands on its own frame rather than on the buffer boundary. A block also has a
+deadline — 96 frames at 48 kHz is 2 ms — so what a *busy* block costs is
+measured rather than averaged away: sixteen notes or sixteen parameter changes
+landing in the same one take it from 31% of a 168 MHz Cortex-M4F's budget to
+40%, not past it. `tools/bench-block/run.sh` is where that comes from.
 
 ## Several parts
 
@@ -128,7 +146,7 @@ program; CI tests 4, 8 and 32.
 The point of this library is portability, so the claims about it are measured
 rather than asserted, and the ones that are not are labelled.
 
-- **Verified here**: the core and its 98 tests, under gcc and clang with
+- **Verified here**: the core and its 116 tests, under gcc and clang with
   `-Wconversion -Werror`, at three voice counts, with the headers compiled as
   C++ and with parameter names stripped. Spectra are measured with a Goertzel
   probe at exact frequencies rather than asserted on the shape of the code, and
@@ -142,11 +160,11 @@ rather than asserted, and the ones that are not are labelled.
   On Cortex-M4F the whole library needs one symbol: `memset`.
 - **Measured on emulated silicon**: `tools/bench-arm/run.sh` renders a second
   of audio on QEMU's Cortex-M0 and Cortex-M4F models and counts instructions
-  with a TCG plugin. Eight voices cost 90.6 M instructions a second on the M4F
-  and 2693 M on the M0 — soft float is about 30x the whole render loop, not the
-  modest per-call tax the symbol list suggests. So an M4F-class part runs this
-  comfortably at four voices and at its limit near eight, and an RP2040 cannot
-  run even one voice in real time; reaching an M0+ means a fixed-point path.
+  with a TCG plugin, and a second plugin attributes them to functions. Eight
+  voices cost 47.6 M instructions a second on the M4F and 1122 M on the M0 —
+  soft float is about 24x the whole render loop, not the modest per-call tax
+  the symbol list suggests. So an M4F-class part runs eight voices in under a
+  third of a 168 MHz core, while an RP2040 needs 1.2 cores for one voice.
   Instructions are not cycles, so those are floors.
 - **Not verified**: the desktop backend has never been run, and no embedded
   target has ever run on real silicon. `CLAUDE.md` keeps the full list, kept
@@ -157,7 +175,8 @@ rather than asserted, and the ones that are not are labelled.
 ```
 libsynth/
   include/synth/   config.h, dsp.h, synth.h, midi.h — the public surface
-  src/             dsp.c (units), synth.c (engine), midi.c (parser)
+  src/             dsp.c (units), synth.c (engine), midi.c and delay.c, each
+                   its own translation unit so a target can leave it out
   tests/           one host suite, no audio hardware needed
   backends/        pc, android, embedded
   examples/        render_wav, and the demo sequencer both players share

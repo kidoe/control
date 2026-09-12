@@ -50,6 +50,18 @@ jobs:
           -DCMAKE_C_FLAGS=-fno-stack-protector
           && cmake --build build
 
+      - name: The tests must be clean under memcheck
+        # Catches what the assertions cannot: a read of memory nobody wrote,
+        # which a later write can paper over so that every test still passes.
+        # Exactly that slipped in once, in synth_init, and this is how it was
+        # found.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends valgrind
+          cmake -S libsynth -B build-vg -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build-vg
+          valgrind -q --error-exitcode=1 --track-origins=yes build-vg/test_synth
+
       - name: The core must link against nothing
         run: sh libsynth/tools/check-no-external-deps.sh build/libsynth.a
 
@@ -85,7 +97,7 @@ jobs:
                         "-mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16"; do
             echo "=== $target ==="
             rm -rf arm-build && mkdir arm-build
-            for unit in dsp synth midi; do
+            for unit in dsp synth midi delay; do
               arm-none-eabi-gcc $target -Os -std=c11 \
                 -Wall -Wextra -Wpedantic -Wconversion -Werror \
                 -Ilibsynth/include -c libsynth/src/$unit.c -o arm-build/$unit.o

@@ -14,11 +14,21 @@
  * two different sounds and a patch belongs to an instance. The host sums them
  * and owns the headroom: each instance is bounded by 1 on its own, so two of
  * them at full level would reach 2.
+ *
+ * The echo sits on the line only, not on the kick, which is the arrangement a
+ * delay outside the engine makes possible. Its buffer is declared here, by the
+ * host, because the library never allocates.
  */
+
+/* Longest echo this demo can ask for: a quarter of a second at any rate it is
+   likely to run at. */
+#define DEMO_DELAY_FRAMES 12000
 
 typedef struct {
     synth_t *lead;
     synth_t *drums;
+    synth_delay_t echo;
+    float echo_line[DEMO_DELAY_FRAMES];
     int step_frames;
     int frames_to_next;
     int step;
@@ -83,6 +93,11 @@ static void demo_init(demo_t *d, synth_t *s, synth_t *drums, float sample_rate, 
 
     demo_init_kick(drums, sample_rate);
 
+    /* A dotted eighth against the pattern, which is the classic setting: the
+       echo lands between the steps rather than on top of them. */
+    synth_delay_init(&d->echo, d->echo_line, DEMO_DELAY_FRAMES, sample_rate);
+    synth_delay_set(&d->echo, 45.0f / bpm, 0.45f, 0.3f);
+
     d->lead = s;
     d->drums = drums;
     d->step_frames = (int)(sample_rate * 30.0f / bpm); /* eighth notes */
@@ -138,7 +153,7 @@ static void demo_render(demo_t *d, float *out, int frames)
         synth_render(d->lead, out + done, chunk);
         synth_render(d->drums, drums, chunk);
         for (i = 0; i < chunk; ++i) {
-            out[done + i] += drums[i];
+            out[done + i] = synth_delay_next(&d->echo, out[done + i]) + drums[i];
         }
         d->frames_to_next -= chunk;
         done += chunk;

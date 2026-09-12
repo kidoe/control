@@ -10,6 +10,7 @@ option(SYNTH_BUILD_PC_PLAYBACK "Build the realtime desktop player (downloads min
 set(SYNTH_MAX_VOICES "8" CACHE STRING "Maximum polyphony, fixed at compile time")
 
 add_library(synth STATIC
+    src/delay.c
     src/dsp.c
     src/midi.c
     src/synth.c

@@ -1270,12 +1270,9 @@ static void test_envelope_stages(void)
     int i;
 
     synth_env_init(&env, SR);
-    env.delay = 0.0f;
-    env.attack = 0.1f;
-    env.hold = 0.0f;
-    env.decay = 0.1f;
-    env.sustain = 0.4f;
-    env.release = 0.1f;
+    /* Through the setter, not into the fields: each ramp keeps how far it
+       travels per sample, and that is derived from the times here. */
+    synth_env_set_times(&env, 0.0f, 0.1f, 0.0f, 0.1f, 0.4f, 0.1f);
 
     CHECK(!synth_env_is_active(&env));
     synth_env_gate_on(&env);
@@ -2327,9 +2324,12 @@ static void test_lfo_retriggers_with_the_note(void)
     static float buf[512];
 
     /* Vibrato that starts wherever the LFO happened to be would make the same
-       note sound different each time it is struck. */
+       note sound different each time it is struck. A destination has to be set
+       for there to be anything to hear: the engine does not run an LFO that
+       reaches nothing, so with every depth centred its phase would not move. */
     synth_init(&s, SR);
     synth_set_param(&s, SYNTH_PARAM_LFO_RATE, 0.5f);
+    synth_set_param(&s, SYNTH_PARAM_LFO_TO_CUTOFF, 1.0f);
     synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
     synth_note_on(&s, 60, 1.0f);
     synth_render(&s, buf, 512);
@@ -2473,26 +2473,29 @@ static void test_pitch_env_defaults_change_nothing(void)
    moved would reinterpret every saved sound in silence. */
 static void test_new_parameters_are_appended(void)
 {
-    CHECK(SYNTH_PARAM_PITCH_ENV_AMOUNT == SYNTH_PARAM_LFO_TO_AMP + 1);
-    CHECK(SYNTH_PARAM_PITCH_ENV_DECAY == SYNTH_PARAM_COUNT - 1);
-    /* The indices this library has published, spelled out so that moving one
-       fails here rather than at a host that already has patches on disk. */
+    /* Every index this library has published, spelled out, so that moving one
+       fails here rather than at a host that already has patches on disk. A new
+       parameter adds a line at the bottom and changes nothing above it. */
     CHECK(SYNTH_PARAM_MASTER_GAIN == 0);
     CHECK(SYNTH_PARAM_FILTER_ENV_AMOUNT == 17);
     CHECK(SYNTH_PARAM_AMP_VELOCITY == 24);
     CHECK(SYNTH_PARAM_LFO_TO_AMP == 29);
+    CHECK(SYNTH_PARAM_PITCH_ENV_AMOUNT == 30);
+    CHECK(SYNTH_PARAM_PITCH_ENV_ATTACK == 31);
+    CHECK(SYNTH_PARAM_PITCH_ENV_DECAY == 32);
+    CHECK(SYNTH_PARAM_GLIDE == 33);
 }
 
-/* A patch from a build with fewer parameters. Filling what it does not carry
-   with zeros would put the new bipolar amount at its negative extreme, so the
-   short load fills from the defaults instead and the old sound comes back
-   unchanged. */
+/* A patch from the build before the pitch envelope existed. Filling what it
+   does not carry with zeros would put that bipolar amount at its negative
+   extreme, so the short load fills from the defaults instead and the old sound
+   comes back unchanged. */
 static void test_a_short_patch_loads_at_its_defaults(void)
 {
     synth_t s;
     static float buf[512];
     float patch[SYNTH_PARAM_COUNT];
-    int older = SYNTH_PARAM_COUNT - 3;
+    int older = SYNTH_PARAM_PITCH_ENV_AMOUNT;
     int i;
 
     synth_init(&s, SR);
@@ -2558,6 +2561,576 @@ static void test_centring_the_amount_puts_the_note_back(void)
 
     synth_set_param(&s, SYNTH_PARAM_PITCH_ENV_AMOUNT, 0.5f);
     CHECK_NEAR(rendered_hz(&s, buf, 512, 0.2f), 440.0f, 8.0f);
+}
+
+/* The engine skips any modulation whose depth is centred, because work nothing
+   listens to is pure cost. These three pin the consequence: silent when off,
+   and awake the moment a depth is turned up. */
+static void test_a_modulation_nothing_hears_changes_nothing(void)
+{
+    synth_t slow, fast;
+    static float a[600], b[600];
+    int i;
+
+    /* Same patch, two LFO rates, every destination centred. If the LFO reached
+       anything at all these would diverge. */
+    synth_init(&slow, SR);
+    synth_init(&fast, SR);
+    synth_set_param(&slow, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&fast, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&slow, SYNTH_PARAM_LFO_RATE, 0.1f);
+    synth_set_param(&fast, SYNTH_PARAM_LFO_RATE, 1.0f);
+    synth_note_on(&slow, 60, 1.0f);
+    synth_note_on(&fast, 60, 1.0f);
+    synth_render(&slow, a, 600);
+    synth_render(&fast, b, 600);
+
+    for (i = 0; i < 600; ++i) {
+        CHECK_NEAR(a[i], b[i], 0.0f);
+    }
+}
+
+static void test_turning_a_depth_up_mid_note_wakes_the_lfo(void)
+{
+    synth_t s;
+    static float buf[256];
+    float lowest = 1e9f, highest = -1e9f;
+    int block;
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_CUTOFF, 0.5f);
+    synth_set_param(&s, SYNTH_PARAM_LFO_RATE, 0.6f);
+    synth_note_on(&s, 60, 1.0f);
+    render_seconds(&s, buf, 256, 0.5f); /* nothing listening, so nothing moves */
+    CHECK(s.voices[0].lfo.phase == 0.0f);
+
+    synth_set_param(&s, SYNTH_PARAM_LFO_TO_CUTOFF, 1.0f);
+    for (block = 0; block < 120; ++block) {
+        float octaves;
+
+        synth_render(&s, buf, 256);
+        octaves = voice_cutoff_octaves(&s);
+        if (octaves < lowest) {
+            lowest = octaves;
+        }
+        if (octaves > highest) {
+            highest = octaves;
+        }
+    }
+    CHECK(highest > lowest * 1.5f);
+}
+
+static void test_a_filter_nothing_modulates_is_left_alone(void)
+{
+    synth_t s;
+    static float buf[256];
+    float settled, later, opened;
+
+    /* Envelope amount centred, no key tracking, LFO centred: the cutoff has
+       nothing to follow, so it must not move. */
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_CUTOFF, 0.4f);
+    synth_note_on(&s, 60, 1.0f);
+    synth_render(&s, buf, 256);
+    settled = voice_cutoff_octaves(&s);
+    render_seconds(&s, buf, 256, 0.5f);
+    later = voice_cutoff_octaves(&s);
+    CHECK_NEAR(later, settled, 0.0f);
+
+    /* And the moment the envelope is given an amount, it follows again. It
+       starts from where it was frozen, which is the one thing this costs: an
+       envelope that has not been running has not decayed either. */
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_ATTACK, 0.0f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_AMOUNT, 1.0f); /* +4 octaves */
+    render_seconds(&s, buf, 256, 0.05f);
+    opened = voice_cutoff_octaves(&s);
+    CHECK(opened > settled * 2.0f);
+}
+
+/* A parameter change re-applies only the parts of a voice that parameter
+   reaches, because re-applying all of them cost more than three blocks of
+   audio. This checks that shortcut against the long way round, for every
+   parameter there is and under every waveform: synth_load_patch() re-applies
+   everything, so a sounding voice edited through synth_set_param() has to come
+   out identical. State rather than audio, because a parameter placed in the
+   wrong bucket can leave a voice wrong in a way this patch happens not to
+   sound — until the next note does.
+
+   Only the sounding voice. An idle one is tuned lazily, by the note_on that
+   claims it, so its oscillator frequency is deliberately undefined in between
+   and the two paths leave it in different places. */
+static void test_a_parameter_change_reaches_everything_it_should(void)
+{
+    static float quick[256], full[256];
+    int p, w;
+
+    for (w = 0; w < SYNTH_WAVE_COUNT; ++w) {
+        for (p = 0; p < SYNTH_PARAM_COUNT; ++p) {
+            synth_t a, b;
+            float patch[SYNTH_PARAM_COUNT];
+            float before = synth_param_info((synth_param_t)p)->default_norm;
+            float after = (before > 0.5f) ? 0.2f : 0.8f;
+
+            synth_init(&a, SR);
+            synth_init(&b, SR);
+            synth_set_param(&a, SYNTH_PARAM_OSC_WAVE, (float)w / (float)(SYNTH_WAVE_COUNT - 1));
+            synth_set_param(&b, SYNTH_PARAM_OSC_WAVE, (float)w / (float)(SYNTH_WAVE_COUNT - 1));
+            synth_set_param(&a, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+            synth_set_param(&b, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+            synth_note_on(&a, 55, 0.8f);
+            synth_note_on(&b, 55, 0.8f);
+            synth_render(&a, quick, 256);
+            synth_render(&b, full, 256);
+
+            /* The same edit, once through the shortcut and once through a
+               whole patch load, which reapplies every unit of every voice. */
+            synth_set_param(&a, (synth_param_t)p, after);
+            synth_save_patch(&b, patch);
+            patch[p] = after;
+            synth_load_patch(&b, patch);
+
+            /* synth_voice_t is all four-byte members, so this compares state
+               and not padding. */
+            if (memcmp(&a.voices[0], &b.voices[0], sizeof a.voices[0]) != 0) {
+                printf("FAIL %s:%d: parameter %d leaves a voice wrong on wave %d\n",
+                       __FILE__, __LINE__, p, w);
+                ++g_failures;
+            }
+
+            /* And the audio that state produces, which is the point of it. */
+            synth_render(&a, quick, 256);
+            synth_render(&b, full, 256);
+            if (memcmp(quick, full, sizeof quick) != 0) {
+                printf("FAIL %s:%d: parameter %d diverges in the audio on wave %d\n",
+                       __FILE__, __LINE__, p, w);
+                ++g_failures;
+            }
+        }
+    }
+}
+
+/* And the unit on its own, which is where synth_env_set_sample_rate() is the
+   only thing that can put the derived rates right: the engine happens to reset
+   every voice's times when a note starts, so it would paper over this. */
+static int env_attack_samples(float sample_rate, int retune)
+{
+    synth_env_t env;
+    int i;
+
+    synth_env_init(&env, 44100.0f);
+    synth_env_set_times(&env, 0.0f, 0.25f, 0.0f, 1.0f, 1.0f, 1.0f);
+    if (retune) {
+        synth_env_set_sample_rate(&env, sample_rate);
+    } else {
+        env.sample_rate = sample_rate; /* the field alone, which is not enough */
+    }
+    synth_env_gate_on(&env);
+    for (i = 0; i < 400000; ++i) {
+        synth_env_next(&env);
+        if (env.stage != SYNTH_ENV_ATTACK && env.stage != SYNTH_ENV_DELAY) {
+            break;
+        }
+    }
+    return i;
+}
+
+static void test_an_envelope_retimes_itself_for_a_new_rate(void)
+{
+    int at_44k = env_attack_samples(44100.0f, 1);
+    int at_96k = env_attack_samples(96000.0f, 1);
+
+    /* A quarter of a second, counted in each rate's own samples. */
+    CHECK(at_44k > 11000 && at_44k < 11200);
+    CHECK(at_96k > 23900 && at_96k < 24100);
+}
+
+/* Envelope times are in seconds, so they have to survive a host that only
+   learns the device's real rate once the stream is open. Each ramp keeps how
+   far it travels per sample, which is the thing a rate change invalidates. */
+static void test_envelope_times_survive_a_sample_rate_change(void)
+{
+    synth_t s;
+    static float buf[256];
+    float at_44k, at_96k;
+    int i;
+
+    synth_init(&s, 44100.0f);
+    synth_set_param(&s, SYNTH_PARAM_AMP_ATTACK, 0.5f);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_note_on(&s, 60, 1.0f);
+    for (i = 0; i < 400; ++i) {
+        synth_render(&s, buf, 256);
+        if (s.voices[0].amp_env.stage != SYNTH_ENV_ATTACK) {
+            break;
+        }
+    }
+    at_44k = (float)(i * 256) / 44100.0f;
+
+    synth_init(&s, 44100.0f);
+    synth_set_param(&s, SYNTH_PARAM_AMP_ATTACK, 0.5f);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_sample_rate(&s, 96000.0f);
+    synth_note_on(&s, 60, 1.0f);
+    for (i = 0; i < 800; ++i) {
+        synth_render(&s, buf, 256);
+        if (s.voices[0].amp_env.stage != SYNTH_ENV_ATTACK) {
+            break;
+        }
+    }
+    at_96k = (float)(i * 256) / 96000.0f;
+
+    CHECK(at_44k > 0.05f); /* long enough that the comparison means something */
+    CHECK_NEAR(at_96k, at_44k, at_44k * 0.05f);
+}
+
+/* Portamento: a note starts on the pitch of the one before it and travels. */
+static void test_glide_starts_a_note_on_the_previous_pitch(void)
+{
+    synth_t s;
+    static float buf[512];
+    float at_start, at_end;
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_GLIDE, 0.63f); /* about half a second */
+
+    /* The first note has nothing to come from, so it must be in tune at once. */
+    synth_note_on(&s, 45, 1.0f); /* 110 Hz */
+    CHECK_NEAR(rendered_hz(&s, buf, 512, 0.1f), 110.0f, 6.0f);
+    render_seconds(&s, buf, 512, 0.6f);
+    synth_note_off(&s, 45);
+    /* Right through the release: rendered_hz counts crossings of the sum, so a
+       note still dying would be measured along with the new one. */
+    render_seconds(&s, buf, 512, 0.6f);
+
+    /* The second starts where the first was and arrives at its own pitch. */
+    synth_note_on(&s, 57, 1.0f); /* 220 Hz */
+    at_start = rendered_hz(&s, buf, 512, 0.03f);
+    render_seconds(&s, buf, 512, 1.0f);
+    at_end = rendered_hz(&s, buf, 512, 0.2f);
+
+    CHECK(at_start < 140.0f);
+    CHECK_NEAR(at_end, 220.0f, 8.0f);
+}
+
+/* The control is a time, so a longer one has the note further from home at the
+   same moment. */
+static void test_glide_time_sets_how_long_the_travel_takes(void)
+{
+    synth_t s;
+    static float buf[512];
+    float quick, slow;
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_GLIDE, 0.4f); /* about 130 ms */
+    synth_note_on(&s, 45, 1.0f);
+    render_seconds(&s, buf, 512, 0.3f);
+    synth_note_off(&s, 45);
+    render_seconds(&s, buf, 512, 0.6f);
+    synth_note_on(&s, 69, 1.0f);
+    render_seconds(&s, buf, 512, 0.2f); /* long over */
+    quick = rendered_hz(&s, buf, 512, 0.1f);
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_GLIDE, 0.9f); /* about 1.5 s */
+    synth_note_on(&s, 45, 1.0f);
+    render_seconds(&s, buf, 512, 0.3f);
+    synth_note_off(&s, 45);
+    render_seconds(&s, buf, 512, 0.6f);
+    synth_note_on(&s, 69, 1.0f);
+    render_seconds(&s, buf, 512, 0.2f); /* barely started */
+    slow = rendered_hz(&s, buf, 512, 0.1f);
+
+    CHECK_NEAR(quick, 440.0f, 12.0f);
+    CHECK(slow < quick * 0.6f);
+}
+
+/* Off by default, and off means exactly off: a note is in tune from its first
+   sample however many notes came before it. */
+static void test_no_glide_by_default(void)
+{
+    synth_t s;
+    static float buf[512];
+
+    CHECK_NEAR(synth_param_denorm(SYNTH_PARAM_GLIDE,
+                                  synth_param_info(SYNTH_PARAM_GLIDE)->default_norm),
+               0.0f, 1e-6f);
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_note_on(&s, 45, 1.0f);
+    render_seconds(&s, buf, 512, 0.3f);
+    synth_note_off(&s, 45);
+    render_seconds(&s, buf, 512, 0.6f); /* let it die, so only the new note is heard */
+    synth_note_on(&s, 69, 1.0f);
+    CHECK_NEAR(rendered_hz(&s, buf, 512, 0.05f), 440.0f, 20.0f);
+}
+
+/* Each voice carries its own travel, so a chord built one note at a time does
+   not drag the notes already in it. */
+static void test_a_glide_belongs_to_its_own_voice(void)
+{
+    synth_t s;
+    static float buf[512];
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+    synth_set_param(&s, SYNTH_PARAM_GLIDE, 0.7f);
+    synth_note_on(&s, 45, 1.0f);
+    render_seconds(&s, buf, 512, 0.5f);   /* in tune, nothing to travel */
+    CHECK(s.voices[0].glide == 0.0f);
+
+    synth_note_on(&s, 69, 1.0f);          /* a second voice, travelling */
+    CHECK(s.voices[0].glide == 0.0f);
+    CHECK(s.voices[1].glide != 0.0f);
+
+    render_seconds(&s, buf, 512, 2.0f);
+    CHECK(s.voices[1].glide == 0.0f);     /* and it arrives */
+}
+
+/* The delay line. The buffer is the caller's, so these tests declare it the way
+   an MCU would. */
+#define DELAY_FRAMES 8192
+
+/* A triangle, so the tests have a continuous signal without reaching into the
+   oscillator's internals. Period is `period` frames, peak is 1. */
+static float ramp_wave(int i, int period)
+{
+    float t = (float)(i % period) / (float)period;
+
+    return (t < 0.5f) ? (4.0f * t - 1.0f) : (3.0f - 4.0f * t);
+}
+
+static void test_delay_repeats_after_its_time(void)
+{
+    synth_delay_t d;
+    static float line[DELAY_FRAMES];
+    float out;
+    int i;
+    int heard = -1;
+
+    synth_delay_init(&d, line, DELAY_FRAMES, SR);
+    synth_delay_set(&d, 0.05f, 0.0f, 1.0f); /* 50 ms, wet only, no repeats */
+    /* Long enough for the read point to have finished sliding to 50 ms. */
+    for (i = 0; i < 8000; ++i) {
+        synth_delay_next(&d, 0.0f);
+    }
+
+    out = synth_delay_next(&d, 1.0f); /* one full-scale frame in */
+    CHECK_NEAR(out, 0.0f, 1e-6f);     /* nothing back yet */
+    for (i = 1; i < 4000; ++i) {
+        out = synth_delay_next(&d, 0.0f);
+        if (out > 0.5f) {
+            heard = i;
+            break;
+        }
+    }
+    /* 50 ms at this rate is 2205 frames. One either way for the interpolator. */
+    CHECK(heard >= 2203 && heard <= 2207);
+}
+
+static void test_delay_feedback_decays(void)
+{
+    synth_delay_t d;
+    static float line[DELAY_FRAMES];
+    float peaks[3] = { 0.0f, 0.0f, 0.0f };
+    int i, n;
+
+    synth_delay_init(&d, line, DELAY_FRAMES, SR);
+    synth_delay_set(&d, 0.02f, 0.5f, 1.0f);
+    for (i = 0; i < 8000; ++i) {
+        synth_delay_next(&d, 0.0f);
+    }
+    synth_delay_next(&d, 1.0f);
+
+    /* Three echoes, each half the one before. */
+    for (n = 0; n < 3; ++n) {
+        for (i = 0; i < 882; ++i) {
+            float v = synth_delay_next(&d, 0.0f);
+
+            if (v > peaks[n]) {
+                peaks[n] = v;
+            }
+        }
+    }
+    CHECK_NEAR(peaks[1], peaks[0] * 0.5f, 0.02f);
+    CHECK_NEAR(peaks[2], peaks[0] * 0.25f, 0.02f);
+}
+
+/* A mix of zero has to be the identity, not "nearly" the identity, so a host
+   can leave the unit in the signal path and switch it off. */
+static void test_delay_is_transparent_at_zero_mix(void)
+{
+    synth_delay_t d;
+    static float line[DELAY_FRAMES];
+    int i;
+
+    synth_delay_init(&d, line, DELAY_FRAMES, SR);
+    synth_delay_set(&d, 0.1f, 0.9f, 0.0f);
+    for (i = 0; i < 4000; ++i) {
+        float in = ramp_wave(i, 128);
+
+        CHECK_NEAR(synth_delay_next(&d, in), in, 0.0f);
+    }
+}
+
+/* Feedback is the one place a bounded input could give an unbounded signal.
+   Driven at full scale with the most feedback the control allows, the line and
+   the output both have to stay inside 1. */
+static void test_delay_stays_bounded_under_runaway_feedback(void)
+{
+    synth_delay_t d;
+    static float line[DELAY_FRAMES];
+    float top = 0.0f;
+    int i;
+
+    synth_delay_init(&d, line, DELAY_FRAMES, SR);
+    synth_delay_set(&d, 0.01f, 1.5f, 1.0f); /* asks for more than is allowed */
+    CHECK_NEAR(d.feedback, 0.95f, 1e-6f);
+
+    for (i = 0; i < 200000; ++i) {
+        float v = synth_delay_next(&d, (i & 64) ? 1.0f : -1.0f);
+
+        if (v > top) {
+            top = v;
+        } else if (-v > top) {
+            top = -v;
+        }
+    }
+    CHECK(top <= 1.0f);
+    for (i = 0; i < DELAY_FRAMES; ++i) {
+        CHECK_NEAR(line[i], line[i], 0.0f); /* no NaN survives a self-compare */
+        if (line[i] > 1.0f || line[i] < -1.0f) {
+            printf("FAIL %s:%d: the line holds %g\n", __FILE__, __LINE__, (double)line[i]);
+            ++g_failures;
+            break;
+        }
+    }
+}
+
+/* A new time slides rather than jumping. Both halves are measured here, so the
+   test proves the sliding is what does it rather than asserting that a number
+   is small: the same change made by moving the read point at once puts a step
+   in the output hundreds of times bigger. */
+static float delay_biggest_step(int jump)
+{
+    synth_delay_t d;
+    static float line[DELAY_FRAMES];
+    float prev, biggest = 0.0f;
+    int i;
+
+    synth_delay_init(&d, line, DELAY_FRAMES, SR);
+    synth_delay_set(&d, 0.08f, 0.0f, 1.0f);
+    /* Slow enough that the signal's own slope is nothing beside a jump. */
+    for (i = 0; i < 20000; ++i) {
+        synth_delay_next(&d, ramp_wave(i, 4000) * 0.8f);
+    }
+
+    prev = synth_delay_next(&d, ramp_wave(20000, 4000) * 0.8f);
+    synth_delay_set(&d, 0.03f, 0.0f, 1.0f);
+    if (jump) {
+        d.offset = d.target; /* what this design exists to avoid */
+    }
+    for (i = 1; i < 8000; ++i) {
+        float v = synth_delay_next(&d, ramp_wave(20000 + i, 4000) * 0.8f);
+        float step = v - prev;
+
+        if (step < 0.0f) {
+            step = -step;
+        }
+        if (step > biggest) {
+            biggest = step;
+        }
+        prev = v;
+    }
+    return biggest;
+}
+
+static void test_delay_time_changes_do_not_click(void)
+{
+    float slid = delay_biggest_step(0);
+    float jumped = delay_biggest_step(1);
+
+    CHECK(slid < 0.01f);
+    CHECK(jumped > 0.1f);
+    CHECK(jumped > slid * 50.0f);
+}
+
+/* The read point lands between samples while it slides, so it has to read
+   between them too. An impulse at a delay of 1000.5 frames must come back split
+   across the two samples either side, not snapped onto one of them — snapping
+   is a staircase, and a staircase on a moving read point is zipper noise. */
+static void test_delay_reads_between_samples(void)
+{
+    synth_delay_t d;
+    static float line[DELAY_FRAMES];
+    int heard = 0;
+    int i;
+
+    synth_delay_init(&d, line, DELAY_FRAMES, SR);
+    synth_delay_set(&d, 1000.5f / SR, 0.0f, 1.0f);
+
+    synth_delay_next(&d, 1.0f);
+    for (i = 1; i < 1500; ++i) {
+        float v = synth_delay_next(&d, 0.0f);
+
+        if (v > 0.1f) {
+            ++heard;
+            CHECK_NEAR(v, 0.5f, 0.01f);
+        }
+    }
+    CHECK(heard == 2);
+}
+
+/* A time changed while audio runs has to be reached, not merely approached: the
+   slide is exponential, so without a last step onto the target a delay set to a
+   musical division would sit permanently just short of it. */
+static void test_delay_arrives_at_a_time_it_is_changed_to(void)
+{
+    synth_delay_t d;
+    static float line[DELAY_FRAMES];
+    int heard = -1;
+    int i;
+
+    synth_delay_init(&d, line, DELAY_FRAMES, SR);
+    synth_delay_set(&d, 0.05f, 0.0f, 1.0f);
+    for (i = 0; i < 4000; ++i) {
+        synth_delay_next(&d, 0.0f);
+    }
+
+    synth_delay_set(&d, 0.02f, 0.0f, 1.0f); /* 882 frames at this rate */
+    for (i = 0; i < 20000; ++i) {
+        synth_delay_next(&d, 0.0f);
+    }
+    CHECK_NEAR(d.offset, 882.0f, 0.0f);
+
+    synth_delay_next(&d, 1.0f);
+    for (i = 1; i < 4000; ++i) {
+        if (synth_delay_next(&d, 0.0f) > 0.5f) {
+            heard = i;
+            break;
+        }
+    }
+    CHECK(heard == 882);
+}
+
+/* No buffer is not a crash, it is a bypass: a host that has not given the unit
+   memory still gets its audio through. */
+static void test_delay_without_a_buffer_is_a_bypass(void)
+{
+    synth_delay_t d;
+    int i;
+
+    synth_delay_init(&d, 0, 0, SR);
+    synth_delay_set(&d, 0.1f, 0.5f, 1.0f);
+    for (i = 0; i < 100; ++i) {
+        CHECK_NEAR(synth_delay_next(&d, 0.25f), 0.25f, 0.0f);
+    }
 }
 
 int main(void)
@@ -2660,6 +3233,24 @@ int main(void)
     test_a_short_patch_loads_at_its_defaults();
     test_pitch_env_restarts_on_a_retrigger();
     test_centring_the_amount_puts_the_note_back();
+    test_a_modulation_nothing_hears_changes_nothing();
+    test_turning_a_depth_up_mid_note_wakes_the_lfo();
+    test_a_filter_nothing_modulates_is_left_alone();
+    test_a_parameter_change_reaches_everything_it_should();
+    test_an_envelope_retimes_itself_for_a_new_rate();
+    test_envelope_times_survive_a_sample_rate_change();
+    test_glide_starts_a_note_on_the_previous_pitch();
+    test_glide_time_sets_how_long_the_travel_takes();
+    test_no_glide_by_default();
+    test_a_glide_belongs_to_its_own_voice();
+    test_delay_repeats_after_its_time();
+    test_delay_feedback_decays();
+    test_delay_is_transparent_at_zero_mix();
+    test_delay_stays_bounded_under_runaway_feedback();
+    test_delay_time_changes_do_not_click();
+    test_delay_reads_between_samples();
+    test_delay_arrives_at_a_time_it_is_changed_to();
+    test_delay_without_a_buffer_is_a_bypass();
 
     if (g_failures == 0) {
         printf("all tests passed\n");
