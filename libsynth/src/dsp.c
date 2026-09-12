@@ -75,10 +75,10 @@ static float terrain_height(float x, float y)
     return (x - y) * (x * x - 1.0f) * (y * y - 1.0f);
 }
 
-static void terrain_point(const synth_osc_t *osc, float phase, float *x, float *y)
+static void terrain_point(float radius, int ratio, float phase, float *x, float *y)
 {
-    *x = osc->terrain_radius * sin_turn(phase + 0.25f);
-    *y = osc->terrain_radius * sin_turn(phase * (float)osc->terrain_ratio);
+    *x = radius * sin_turn(phase + 0.25f);
+    *y = radius * sin_turn(phase * (float)ratio);
 }
 
 /* An arbitrary surface has no reason to be centred or to peak at 1, and both
@@ -89,7 +89,7 @@ static void terrain_point(const synth_osc_t *osc, float phase, float *x, float *
    largest |z - dc| looks like it needs a second pass — but that maximum is
    reached at an extreme of z, so the two extremes are all the second pass would
    have been looking for, and they cost a comparison each on the way past. */
-static void terrain_update(synth_osc_t *osc)
+static void terrain_update(synth_terrain_t *t)
 {
     const int steps = 256;
     float sum = 0.0f;
@@ -102,7 +102,7 @@ static void terrain_update(synth_osc_t *osc)
     int i;
 
     for (i = 0; i < steps; ++i) {
-        terrain_point(osc, (float)i / (float)steps, &x, &y);
+        terrain_point(t->radius, t->ratio, (float)i / (float)steps, &x, &y);
         z = terrain_height(x, y);
         sum += z;
         if (i == 0 || z < lowest) {
@@ -112,12 +112,52 @@ static void terrain_update(synth_osc_t *osc)
             highest = z;
         }
     }
-    osc->terrain_dc = sum / (float)steps;
+    t->dc = sum / (float)steps;
 
-    above = highest - osc->terrain_dc;
-    below = osc->terrain_dc - lowest;
+    above = highest - t->dc;
+    below = t->dc - lowest;
     peak = (above > below) ? above : below;
-    osc->terrain_scale = (peak > 1e-6f) ? 1.0f / peak : 0.0f;
+    t->scale = (peak > 1e-6f) ? 1.0f / peak : 0.0f;
+}
+
+/* Both entry points clamp the same way, so an instance and a bare oscillator
+   asked for the same numbers cannot end up with different cross-sections. */
+static void terrain_clamp(float *radius, int *ratio)
+{
+    if (*radius < 0.05f) {
+        *radius = 0.05f;
+    } else if (*radius > 1.0f) {
+        *radius = 1.0f;
+    }
+    if (*ratio < 1) {
+        *ratio = 1;
+    } else if (*ratio > 8) {
+        *ratio = 8;
+    }
+}
+
+void synth_terrain_set(synth_terrain_t *t, float radius, int ratio)
+{
+    terrain_clamp(&radius, &ratio);
+
+    /* Walking the orbit costs about as much as a third of a block of audio for
+       eight voices, and it depends on nothing but these two numbers. Setting
+       them to what they already are is the common case — every note_on reapplies
+       the whole voice — so it is worth one comparison to find out. */
+    if (radius == t->radius && ratio == t->ratio) {
+        return;
+    }
+    t->radius = radius;
+    t->ratio = ratio;
+    terrain_update(t);
+}
+
+void synth_osc_set_terrain_from(synth_osc_t *osc, const synth_terrain_t *t)
+{
+    osc->terrain_radius = t->radius;
+    osc->terrain_ratio = t->ratio;
+    osc->terrain_scale = t->scale;
+    osc->terrain_dc = t->dc;
 }
 
 /* VOSIM packs a burst of pulses into each period of the fundamental, so how many
@@ -291,42 +331,20 @@ void synth_osc_set_vosim(synth_osc_t *osc, float formant_hz, int pulses, float d
     vosim_update(osc);
 }
 
+/* For a host driving one oscillator directly, and for the tests. An instance
+   with voices derives once into its own synth_terrain_t instead. */
 void synth_osc_set_terrain(synth_osc_t *osc, float radius, int ratio)
 {
-    if (radius < 0.05f) {
-        radius = 0.05f;
-    } else if (radius > 1.0f) {
-        radius = 1.0f;
-    }
-    if (ratio < 1) {
-        ratio = 1;
-    } else if (ratio > 8) {
-        ratio = 8;
-    }
+    synth_terrain_t t;
 
-    /* Walking the orbit costs about as much as a third of a block of audio for
-       eight voices, and it depends on nothing but these two numbers. Setting
-       them to what they already are is the common case — every note_on
-       reapplies the whole voice — so it is worth one comparison to find out. */
+    terrain_clamp(&radius, &ratio);
     if (radius == osc->terrain_radius && ratio == osc->terrain_ratio) {
         return;
     }
-
-    osc->terrain_radius = radius;
-    osc->terrain_ratio = ratio;
-    terrain_update(osc);
-}
-
-void synth_osc_share_terrain(synth_osc_t *osc, const synth_osc_t *from)
-{
-    if (osc->terrain_radius == from->terrain_radius
-        && osc->terrain_ratio == from->terrain_ratio) {
-        return;
-    }
-    osc->terrain_radius = from->terrain_radius;
-    osc->terrain_ratio = from->terrain_ratio;
-    osc->terrain_scale = from->terrain_scale;
-    osc->terrain_dc = from->terrain_dc;
+    t.radius = 0.0f; /* out of the clamped range, so the derivation cannot be skipped */
+    t.ratio = 0;
+    synth_terrain_set(&t, radius, ratio);
+    synth_osc_set_terrain_from(osc, &t);
 }
 
 float synth_osc_next(synth_osc_t *osc)
@@ -390,7 +408,7 @@ float synth_osc_next(synth_osc_t *osc)
        Lissajous figure changes the timbre in ways that have no description in
        terms of harmonics. */
     case SYNTH_WAVE_TERRAIN:
-        terrain_point(osc, phase, &tx, &ty);
+        terrain_point(osc->terrain_radius, osc->terrain_ratio, phase, &tx, &ty);
         out = (terrain_height(tx, ty) - osc->terrain_dc) * osc->terrain_scale;
         break;
 

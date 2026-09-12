@@ -503,21 +503,37 @@ static void test_every_voice_shares_one_terrain_cross_section(void)
 {
     synth_t s;
     synth_osc_t reference;
+    float buf[64];
     int round, i;
 
     synth_init(&s, SR);
     synth_set_param(&s, SYNTH_PARAM_OSC_WAVE,
                     (float)SYNTH_WAVE_TERRAIN / (float)(SYNTH_WAVE_COUNT - 1));
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
     synth_osc_init(&reference, SR);
+
+    /* Every slot sounding, because an idle one holds nothing: a parameter change
+       reaches the voices that can be heard, and the note_on that claims a slot is
+       what puts the current sound into it. */
+    for (i = 0; i < SYNTH_MAX_VOICES; ++i) {
+        synth_note_on(&s, 48 + i, 0.9f);
+    }
+    synth_render(&s, buf, 64);
 
     /* Twice, with different values: a voice left holding the first answer would
        pass a single round. */
     for (round = 0; round < 2; ++round) {
-        synth_set_param(&s, SYNTH_PARAM_TERRAIN_RADIUS, round ? 0.25f : 0.85f);
-        synth_set_param(&s, SYNTH_PARAM_TERRAIN_RATIO, round ? 0.9f : 0.3f);
+        float radius_norm = round ? 0.25f : 0.85f;
+        float ratio_norm = round ? 0.9f : 0.3f;
 
-        synth_osc_set_terrain(&reference, s.voices[0].osc.terrain_radius,
-                              s.voices[0].osc.terrain_ratio);
+        synth_set_param(&s, SYNTH_PARAM_TERRAIN_RADIUS, radius_norm);
+        synth_set_param(&s, SYNTH_PARAM_TERRAIN_RATIO, ratio_norm);
+
+        /* Derived from the parameters, not from what the engine ended up with,
+           so a stale cross-section cannot agree with itself. */
+        synth_osc_set_terrain(&reference,
+                              synth_param_denorm(SYNTH_PARAM_TERRAIN_RADIUS, radius_norm),
+                              (int)synth_param_denorm(SYNTH_PARAM_TERRAIN_RATIO, ratio_norm));
         for (i = 0; i < SYNTH_MAX_VOICES; ++i) {
             CHECK(s.voices[i].osc.terrain_radius == reference.terrain_radius);
             CHECK(s.voices[i].osc.terrain_ratio == reference.terrain_ratio);
@@ -2186,8 +2202,16 @@ static void test_patches_keep_instances_apart(void)
     synth_save_patch(&a, patch);
     synth_load_patch(&b, patch);
 
+    /* On the parameters, which is what a patch carries, and on the voice a note
+       claims — not on an idle voice's oscillator, which holds nothing until a
+       note_on rebuilds it. */
+    CHECK_NEAR(synth_get_param(&b, SYNTH_PARAM_OSC_WAVE),
+               synth_get_param(&a, SYNTH_PARAM_OSC_WAVE), 1e-6f);
+    synth_note_on(&b, 60, 1.0f);
     CHECK(b.voices[0].osc.wave == SYNTH_WAVE_NOISE);
+
     synth_set_param(&b, SYNTH_PARAM_OSC_WAVE, 0.0f);
+    synth_note_on(&a, 60, 1.0f);
     CHECK(a.voices[0].osc.wave == SYNTH_WAVE_NOISE);
 }
 
@@ -3140,6 +3164,55 @@ static int env_attack_samples(float sample_rate, int retune)
     return i;
 }
 
+/* What licenses skipping the idle voices on a parameter change: a note played
+   after the change has to come out identical to one that was already sounding
+   when it arrived. Both engines here do exactly one note_on and one
+   set_param — only the order differs — so there is no history to explain away
+   and a whole-voice comparison is fair. If any unit a parameter reaches were
+   missing from the note_on path, this is where it would show: the parameter
+   would be in the engine and not in the voice that played it. */
+static void test_a_note_played_after_an_edit_matches_one_playing_during_it(void)
+{
+    static float later[256], during[256];
+    int p, w;
+
+    for (w = 0; w < SYNTH_WAVE_COUNT; ++w) {
+        for (p = 0; p < SYNTH_PARAM_COUNT; ++p) {
+            synth_t a, b;
+            float before = synth_param_info((synth_param_t)p)->default_norm;
+            float after = (before > 0.5f) ? 0.2f : 0.8f;
+
+            synth_init(&a, SR);
+            synth_init(&b, SR);
+            synth_set_param(&a, SYNTH_PARAM_OSC_WAVE, (float)w / (float)(SYNTH_WAVE_COUNT - 1));
+            synth_set_param(&b, SYNTH_PARAM_OSC_WAVE, (float)w / (float)(SYNTH_WAVE_COUNT - 1));
+            synth_set_param(&a, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+            synth_set_param(&b, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+
+            /* a: the edit lands on an idle slot and the note claims it after.
+               b: the note is already sounding, so the edit is applied in place. */
+            synth_set_param(&a, (synth_param_t)p, after);
+            synth_note_on(&a, 55, 0.8f);
+            synth_note_on(&b, 55, 0.8f);
+            synth_set_param(&b, (synth_param_t)p, after);
+
+            if (memcmp(&a.voices[0], &b.voices[0], sizeof a.voices[0]) != 0) {
+                printf("FAIL %s:%d: parameter %d reaches a sounding voice but not"
+                       " a note_on, on wave %d\n", __FILE__, __LINE__, p, w);
+                ++g_failures;
+            }
+
+            synth_render(&a, later, 256);
+            synth_render(&b, during, 256);
+            if (memcmp(later, during, sizeof later) != 0) {
+                printf("FAIL %s:%d: parameter %d diverges in the audio on wave %d\n",
+                       __FILE__, __LINE__, p, w);
+                ++g_failures;
+            }
+        }
+    }
+}
+
 static void test_an_envelope_retimes_itself_for_a_new_rate(void)
 {
     int at_44k = env_attack_samples(44100.0f, 1);
@@ -3655,6 +3728,7 @@ int main(void)
     test_turning_a_depth_up_mid_note_wakes_the_lfo();
     test_a_filter_nothing_modulates_is_left_alone();
     test_a_parameter_change_reaches_everything_it_should();
+    test_a_note_played_after_an_edit_matches_one_playing_during_it();
     test_an_envelope_retimes_itself_for_a_new_rate();
     test_envelope_times_survive_a_sample_rate_change();
     test_glide_starts_a_note_on_the_previous_pitch();

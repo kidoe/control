@@ -106,7 +106,12 @@ lands on its own frame rather than on the buffer boundary. A block also has a
 deadline — 96 frames at 48 kHz is 2 ms — so what a *busy* block costs is
 measured rather than averaged away: sixteen notes or sixteen parameter changes
 landing in the same one take it from 31% of a 168 MHz Cortex-M4F's budget to
-40%, not past it. `tools/bench-block/run.sh` is where that comes from.
+40%, not past it. `tools/bench-block/run.sh` is where that comes from, and it is
+how three separate ways of overrunning that deadline were found and removed — a
+knob move that re-applied every unit of every voice, a wave-terrain control that
+walked its orbit once per voice, and a parameter change that reached voice slots
+nobody could hear. A kit change on a track with one note sounding went from
+348,348 instructions, which is the whole deadline, to 15,044.
 
 ## Several parts
 
@@ -181,7 +186,7 @@ program; CI tests 4, 8 and 32.
 The point of this library is portability, so the claims about it are measured
 rather than asserted, and the ones that are not are labelled.
 
-- **Verified here**: the core and its 129 tests, under gcc and clang with
+- **Verified here**: the core and its 130 tests, under gcc and clang with
   `-Wconversion -Werror`, at three voice counts, with the headers compiled as
   C++ and with parameter names stripped. Spectra are measured with a Goertzel
   probe at exact frequencies rather than asserted on the shape of the code, and

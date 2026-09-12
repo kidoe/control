@@ -72,12 +72,27 @@ void  synth_osc_set_pd_knee(synth_osc_t *osc, float knee);
 void  synth_osc_set_vosim(synth_osc_t *osc, float formant_hz, int pulses, float decay);
 void  synth_osc_set_terrain(synth_osc_t *osc, float radius, int ratio);
 
-/* Takes the cross-section another oscillator has already derived. Walking the
-   orbit depends on nothing but the radius and the ratio, so voices that share
-   those two numbers — every voice of one instance does — can share the answer
-   instead of each computing it. Walking it once per voice cost a whole audio
-   deadline every time either control moved. */
-void  synth_osc_share_terrain(synth_osc_t *osc, const synth_osc_t *from);
+/* The wave terrain's cross-section, which is what walking the orbit derives, and
+   the one oscillator setting that costs real work to compute: a lap to find the
+   surface's mean and peak along that orbit, since an arbitrary surface is
+   neither centred nor bounded by 1. It depends on the radius and the ratio and
+   on nothing else, so it belongs to whatever owns those — an instance, not a
+   voice. Deriving it per voice cost a whole audio deadline for one move of
+   either control. */
+typedef struct {
+    float radius;
+    float scale;
+    float dc;
+    int ratio;
+} synth_terrain_t;
+
+/* Derives into `t`, or returns at once if it already holds this cross-section.
+   Clamps as synth_osc_set_terrain() does, so an instance and an oscillator
+   asked for the same numbers end up with the same answer. */
+void  synth_terrain_set(synth_terrain_t *t, float radius, int ratio);
+
+/* Points an oscillator at a cross-section already derived. */
+void  synth_osc_set_terrain_from(synth_osc_t *osc, const synth_terrain_t *t);
 
 /* Decorrelates the noise between voices. Any non-zero value will do; the engine
    seeds each voice from its index so a patch still renders identically twice. */

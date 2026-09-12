@@ -40,7 +40,7 @@ away for convenience.
   Cortex-M0+ cannot do at all.
 - **No allocation and no OS calls, ever.** The caller owns the `synth_t`, which
   is why its fields sit in the header: an MCU declares `static synth_t s;`.
-  4640 bytes at 8 voices on ARM32, of which 1544 is the event queue. The two
+  4656 bytes at 8 voices on ARM32, of which 1544 is the event queue. The two
   optional pieces are the caller's too and sit outside it: the delay line's
   buffer, and the 288-byte `synth_patch_queue_t` a host needs only if patches
   arrive from another thread.
@@ -91,13 +91,13 @@ away for convenience.
   | 8 voices, no events | 105,235 | 31.3% |
   | 8 voices, one parameter change | 106,972 | 31.8% |
   | 8 voices, 16 parameter changes | 132,634 | 39.5% |
-  | 8 voices, every parameter as an event | 306,903 | 91.3% |
-  | 8 voices, a whole patch adopted | 240,760 | 71.7% |
+  | 8 voices, every parameter as an event | 263,515 | 78.4% |
+  | 8 voices, a whole patch adopted | 219,135 | 65.2% |
   | 8 voices, 8 notes starting | 119,147 | 35.5% |
   | 8 voices, 16 notes starting | 134,884 | 40.1% |
   | 4 instances mixed, 2 voices each | 127,584 | 38.0% |
   | 4 instances mixed, every slot full | 420,670 | 125.2% |
-  | 4 instances, all four adopt a patch | 359,391 | 107.0% |
+  | 4 instances, all four adopt a patch | 245,579 | 73.1% |
   | 4 instances mixed, all silent | 29,791 | 8.9% |
 
   The instance rows are the same arithmetic seen from the other side: the same
@@ -109,33 +109,58 @@ away for convenience.
   a voice count sized to a track. `SYNTH_MAX_VOICES=4` in the environment re-runs
   the whole table for such a build.
 
-  The two kit-change rows are where the remaining fault is. Changing every
-  parameter of one track costs 91% of the deadline as events and 72% as a patch,
-  and four tracks changing at once costs 107% — over it. That is not the patch
-  queue's doing; it is that a parameter change applies to **every** voice slot,
-  sounding or not, when an idle voice is re-derived from the parameters by the
-  note_on that claims it anyway. Skipping inactive voices there is the next
-  measurable win and it is not done yet. What the patch queue did fix is the
-  worse half of the same problem: the same change as 4 x 34 events is 136 events
-  against a queue of 64, which does not arrive at all.
+  Those rows hold every slot sounding, which is the expensive end and not the
+  usual one. **A kit change costs what the voices it can be heard in cost**, and
+  three things had to go for that to be true. Measured as the change alone, with
+  the render subtracted:
 
-  Measuring per parameter, with `tools/bench-block` on one changed control at a
-  time, found the fault that was in the way of all of this: the two wave-terrain
-  controls cost 328,527 instructions for one move — a whole deadline on their
-  own — because each voice walked the orbit to derive a cross-section that
-  depends on nothing but those two numbers. Deriving it once per instance and
-  copying it, in one lap rather than two, is 24,814. Bit-identical output across
-  a sweep of both controls with six voices sounding; a test pins every voice's
-  derived pair against deriving it in place.
+  | one kit change | 8 of 8 sounding | 1 of 8 sounding |
+  |---|---|---|
+  | before any of this | 440,066 | 348,348 |
+  | the terrain derived once per instance | 136,304 | 44,586 |
+  | idle slots skipped, the orbit walked only when something orbits it | 114,728 | **15,044** |
+
+  and the same change sent as one parameter event each, which is what a host
+  without `synth_patch_send()` has to do: 819,811 → 209,944 → 166,718 with every
+  slot sounding, and 726,377 → 116,510 → **30,463** with one. A kit change used to
+  overrun the 2 ms deadline on its own whatever was playing; it is now 4.5% of it
+  in the case a groovebox actually hits.
+
+  Each of the three came out of measuring one changed control at a time:
+
+  - **The two wave-terrain controls cost 328,527 instructions for one move** — a
+    whole deadline on their own — because every voice walked the orbit to derive a
+    cross-section that depends on nothing but those two numbers. It belongs to the
+    instance, and the second lap of each walk was only re-finding the extremes the
+    first had already passed.
+  - **A parameter change applied to every voice slot, sounding or not**, though an
+    idle slot is rebuilt from these same parameters by the note_on that claims it.
+    A test pins that: for every parameter under every waveform, a note played
+    after an edit comes out identical to one that was already sounding when the
+    edit arrived.
+  - **The orbit was walked even when nothing orbited it.** The walk is 21,545
+    instructions and only the terrain waveform reads its result, so a patch that
+    is not a terrain patch no longer pays for one. Switching to the terrain
+    derives then, against whatever the radius and ratio have become.
+
+  All of it is bit-identical to the previous behaviour: 12,544 samples across
+  every waveform with every parameter moved repeatedly against idle, sounding and
+  releasing voices, and 3,840 more switching the terrain in and out under a sweep
+  of both its controls.
 
   The map from a parameter to the units it reaches is a switch with no default,
   so `-Wswitch` refuses a parameter nobody has placed in it, and a test checks
   every parameter under every waveform against the long way round: a sounding
   voice edited with `synth_set_param()` has to come out identical to one edited
   by re-loading the whole patch.
-- **Modulation that reaches nothing is not computed.** Every depth in the
-  library is bipolar and neutral at its centre, so "does this reach anything"
-  is one comparison, and it is loop-invariant: `render_block()` decides once per
+- **What reaches nothing is not computed.** This is the rule the library keeps
+  finding new places to apply: a modulation depth at its centre, a parameter
+  change aimed at a voice slot nobody can hear, a wave terrain's cross-section
+  when the terrain is not the selected waveform.
+
+  For modulation it works because every depth in the library is bipolar and
+  neutral at its centre, so "does this reach anything" is one comparison, and it
+  is loop-invariant: `render_block()` decides once per
   block whether to advance each envelope and the LFO and whether to retune the
   oscillator and the filter. A patch that has not asked for modulation pays for
   none of it, which is 47% of the render loop. The one thing it
@@ -231,9 +256,10 @@ order the units are actually wired in `synth_render()`.
   voice is seeded from its index, which keeps unison voices uncorrelated without
   making a render unrepeatable. Wave terrain is the one waveform whose settings
   cost real work to derive — a lap of the orbit to find its mean and its peak,
-  since an arbitrary surface is neither centred nor bounded by 1 — and that
-  derivation belongs to the instance rather than to the voice, because it depends
-  on the radius and the ratio and on nothing else.
+  since an arbitrary surface is neither centred nor bounded by 1, which is 21,545
+  instructions. So that derivation belongs to the instance rather than to the
+  voice, since it depends on the radius and the ratio and on nothing else, and it
+  does not happen at all unless the terrain is the selected waveform.
 - **Filter**: topology-preserving SVF, low/high/band-pass, with its own DAHDSR
   envelope and key tracking. Retuned every `SYNTH_MOD_INTERVAL` samples because
   recomputing coefficients costs far more than a sample of audio.
@@ -313,7 +339,7 @@ cmake --build build
 cd build && ctest --output-on-failure
 ```
 
-129 test functions, 331 assertions, no audio hardware needed. Spectra are
+130 test functions, 332 assertions, no audio hardware needed. Spectra are
 measured with a Goertzel probe at exact frequencies rather than asserted on the
 shape of the code, so the tests survive refactoring and catch real regressions.
 
@@ -348,8 +374,8 @@ Be honest about this line; a lot of it cannot be checked from a container.
 - **Cross-compiles and fits, but has never run**: bare metal ARM. CI builds the
   library and `backends/embedded/rp2040_example.c` for Cortex-M0+ and
   Cortex-M4F with `-Wconversion -Werror` and runs the dependency check on both.
-  Measured at 8 voices: 10.0 KB of flash and 5.0 KB of RAM on M0+, 9.2 KB and
-  5.0 KB on M4F. Two of those translation units are optional and a target that
+  Measured at 8 voices: 10.2 KB of flash and 5.1 KB of RAM on M0+, 9.4 KB and
+  5.1 KB on M4F. Two of those translation units are optional and a target that
   leaves them out pays neither: the delay line is 0.6 KB and 0.5 KB of that
   flash, and the patch queue 0.18 KB and 0.16 KB plus 288 bytes of RAM per track
   for the two patches it holds. On an RP2040 the whole thing is 0.5% of its flash

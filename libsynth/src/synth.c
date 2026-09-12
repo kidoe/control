@@ -146,6 +146,28 @@ static void voice_apply_envelope(synth_t *s, synth_voice_t *v)
                         synth_param_denorm(SYNTH_PARAM_AMP_RELEASE, s->params[SYNTH_PARAM_AMP_RELEASE]));
 }
 
+/* Brings the instance's terrain cross-section up to date with its parameters.
+   Cheap when they have not moved — one comparison — and the only place the orbit
+   is ever walked, so it belongs beside every parameter write rather than inside
+   the voice loop that follows it.
+
+   A cross-section nothing orbits is not derived: the walk is 21,545 instructions
+   and every other waveform ignores its result, so a patch that is not a terrain
+   patch does not pay for one. What makes that safe is that every path which can
+   select the terrain calls this — the waveform reaches UNIT_OSC, and a patch load
+   refreshes unconditionally — so switching to it derives then, against whatever
+   the radius and the ratio have become in the meantime. */
+static void terrain_refresh(synth_t *s)
+{
+    if ((synth_wave_t)synth_param_denorm(SYNTH_PARAM_OSC_WAVE, s->params[SYNTH_PARAM_OSC_WAVE])
+        != SYNTH_WAVE_TERRAIN) {
+        return;
+    }
+    synth_terrain_set(&s->terrain,
+                      synth_param_denorm(SYNTH_PARAM_TERRAIN_RADIUS, s->params[SYNTH_PARAM_TERRAIN_RADIUS]),
+                      (int)synth_param_denorm(SYNTH_PARAM_TERRAIN_RATIO, s->params[SYNTH_PARAM_TERRAIN_RATIO]));
+}
+
 static void voice_apply_osc(synth_t *s, synth_voice_t *v)
 {
     v->osc.wave = (synth_wave_t)synth_param_denorm(SYNTH_PARAM_OSC_WAVE, s->params[SYNTH_PARAM_OSC_WAVE]);
@@ -155,20 +177,11 @@ static void voice_apply_osc(synth_t *s, synth_voice_t *v)
                         synth_param_denorm(SYNTH_PARAM_VOSIM_FORMANT, s->params[SYNTH_PARAM_VOSIM_FORMANT]),
                         (int)synth_param_denorm(SYNTH_PARAM_VOSIM_PULSES, s->params[SYNTH_PARAM_VOSIM_PULSES]),
                         synth_param_denorm(SYNTH_PARAM_VOSIM_DECAY, s->params[SYNTH_PARAM_VOSIM_DECAY]));
-    /* One voice walks the terrain orbit and the others copy what it found. The
-       cross-section depends on the radius and the ratio and on nothing else, so
-       deriving it per voice was the same answer computed SYNTH_MAX_VOICES times:
-       328,000 instructions for one move of either control, which is a whole 2 ms
-       deadline on an M4F. Voice 0 is the one that derives, because every path
-       that reaches here has already brought it up to date — a parameter change
-       applies to every voice in order, and so does a patch load. */
-    if (v == &s->voices[0]) {
-        synth_osc_set_terrain(&v->osc,
-                              synth_param_denorm(SYNTH_PARAM_TERRAIN_RADIUS, s->params[SYNTH_PARAM_TERRAIN_RADIUS]),
-                              (int)synth_param_denorm(SYNTH_PARAM_TERRAIN_RATIO, s->params[SYNTH_PARAM_TERRAIN_RATIO]));
-    } else {
-        synth_osc_share_terrain(&v->osc, &s->voices[0].osc);
-    }
+    /* Four floats copied, not a lap of the orbit: the instance derived it once in
+       terrain_refresh(). Deriving it per voice was the same answer computed
+       SYNTH_MAX_VOICES times, 328,000 instructions for one move of either
+       control, which is a whole 2 ms deadline on an M4F. */
+    synth_osc_set_terrain_from(&v->osc, &s->terrain);
 }
 
 /* Tremolo dips from the level rather than lifting past it, so turning the depth
@@ -297,6 +310,15 @@ void synth_init(synth_t *s, float sample_rate)
         s->params[i] = k_param_info[i].default_norm;
     }
     mod_load(s, &m); /* after the defaults are in place, before any voice reads them */
+    /* Defined before any voice copies it, and out of the clamped range so the
+       first refresh that finds the terrain selected cannot mistake it for an
+       answer already derived. A patch that never selects the terrain leaves
+       these zeros in every voice, where nothing reads them. */
+    s->terrain.radius = 0.0f;
+    s->terrain.ratio = 0;
+    s->terrain.scale = 0.0f;
+    s->terrain.dc = 0.0f;
+    terrain_refresh(s);
 
     for (i = 0; i < SYNTH_MAX_VOICES; ++i) {
         synth_voice_t *v = &s->voices[i];
@@ -621,10 +643,23 @@ void synth_set_param(synth_t *s, synth_param_t param, float norm)
         return;
     }
     mod_load(s, &m);
+    if (units & UNIT_OSC) {
+        terrain_refresh(s);
+    }
 
-    /* Edits reach sounding voices, as they did in the JSyn prototype. */
+    /* Edits reach sounding voices, as they did in the JSyn prototype — and only
+       those. An idle slot is rebuilt from the parameters by the note_on that
+       claims it, every unit of it, so applying to one here is work whose result
+       is overwritten before it can be heard. It is not a small saving: with one
+       voice of eight sounding, every parameter of a kit change costs 34,000
+       instructions instead of 202,000. */
     for (i = 0; i < SYNTH_MAX_VOICES; ++i) {
-        voice_apply(s, &m, &s->voices[i], units);
+        synth_voice_t *v = &s->voices[i];
+
+        if (!synth_env_is_active(&v->amp_env)) {
+            continue;
+        }
+        voice_apply(s, &m, v, units);
     }
 }
 
@@ -852,21 +887,29 @@ void synth_load_patch_n(synth_t *s, const float *patch, int count)
     }
 
     mod_load(s, &m);
+    terrain_refresh(s);
 
     /* One pass over the voices rather than one per parameter, which is what
-       calling synth_set_param in a loop would cost. */
+       calling synth_set_param in a loop would cost — and only over the voices
+       that are sounding, because an idle one is rebuilt from these same
+       parameters by the note_on that claims it. */
     for (i = 0; i < SYNTH_MAX_VOICES; ++i) {
-        voice_apply_osc(s, &s->voices[i]);
-        voice_apply_lfo(s, &s->voices[i]);
-        voice_apply_amp(s, &m, &s->voices[i]);
-        voice_apply_envelope(s, &s->voices[i]);
-        voice_apply_filter(s, &m, &s->voices[i]);
-        voice_apply_pitch(s, &s->voices[i]);
+        synth_voice_t *v = &s->voices[i];
+
+        if (!synth_env_is_active(&v->amp_env)) {
+            continue;
+        }
+        voice_apply_osc(s, v);
+        voice_apply_lfo(s, v);
+        voice_apply_amp(s, &m, v);
+        voice_apply_envelope(s, v);
+        voice_apply_filter(s, &m, v);
+        voice_apply_pitch(s, v);
         /* A modulation depth turned back down has to put the note where it
            belongs. The render loop stops retuning the oscillator once nothing
            moves the pitch, so without this the voice would hold whatever offset
            it had when the control was centred. */
-        voice_tune_osc(&m, &s->voices[i]);
+        voice_tune_osc(&m, v);
     }
 }
 

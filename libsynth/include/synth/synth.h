@@ -159,7 +159,12 @@ typedef struct {
     int mod_counter;    /* paces filter retuning, see SYNTH_MOD_INTERVAL */
     float pitch_bend;   /* semitones, applied on top of every note */
     synth_event_queue_t queue;
-    float last_note;    /* what a glide starts from; -1 before anything is played */
+    float last_note;            /* what a glide starts from; -1 before anything is played */
+
+    /* The wave terrain's cross-section belongs here rather than to a voice: it is
+       derived from two parameters and every voice of this instance orbits the
+       same one. */
+    synth_terrain_t terrain;
     uint64_t frame_time;          /* the audio thread's own copy */
     synth_frame_clock_t clock;    /* the copy other threads may read */
 } synth_t;
