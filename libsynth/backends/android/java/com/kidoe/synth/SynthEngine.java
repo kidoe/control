@@ -3,6 +3,18 @@ package com.kidoe.synth;
 /**
  * Bridge to the native synthesis core, driving an AAudio stream.
  *
+ * <p>One stream, {@link #trackCount()} engines. Each track is an independent
+ * engine with its own patch, its own voice pool and its own event queue, and the
+ * native side sums them into the stream. So the first argument of every control
+ * call is a track index, and a parameter set on one track leaves the others
+ * alone — which is the whole point, because the core propagates a parameter
+ * change to the voices already sounding, and a single engine playing a kick and
+ * a hi-hat would turn the decaying kick into the hi-hat.
+ *
+ * <p>Level per track is that track's own {@link #PARAM_MASTER_GAIN}. Headroom
+ * across tracks is the app's: each engine is bounded by 1 on its own, so four in
+ * unison reach four, and nothing in the library can pick that budget.
+ *
  * <p>Control calls are not synchronised: issue them from a single thread. The
  * audio callback runs on a real-time thread owned by AAudio, so never block it
  * and never allocate on it.
@@ -81,6 +93,17 @@ public final class SynthEngine {
     }
 
     /**
+     * Tracks this build was compiled with, which is the valid range of every
+     * track argument. Fixed at build time, like polyphony: the engines are
+     * static storage, because the library never allocates. Change it with
+     * -DSYNTH_TRACKS=n in the backend's CMakeLists.
+     *
+     * <p>A track index outside it is refused rather than obeyed: the scheduling
+     * calls return false, the others do nothing.
+     */
+    public static native int trackCount();
+
+    /**
      * Opens and starts the audio stream, preferring an exclusive mono
      * low-latency stream and giving up one constraint at a time if the device
      * refuses, which emulators do. Returns false only if nothing opened.
@@ -100,36 +123,41 @@ public final class SynthEngine {
     public static native int sampleRate();
 
     /**
-     * Sounds a note as soon as the engine next renders, within one buffer.
+     * Sounds a note on one track as soon as the engine next renders, within one
+     * buffer.
      *
-     * <p>This and the other control calls place an event on a lock-free queue
-     * rather than touching the engine, so they are safe to call from the UI
-     * thread while audio is rendering. The cost is that they take effect on the
-     * next block rather than instantly, and that {@link #getParam(int)} keeps
-     * returning the old value until then.
+     * <p>This and the other control calls place an event on that track's
+     * lock-free queue rather than touching the engine, so they are safe to call
+     * from the UI thread while audio is rendering. The cost is that they take
+     * effect on the next block rather than instantly, and that
+     * {@link #getParam(int, int)} keeps returning the old value until then.
      */
-    public static native void noteOn(int note, float velocity);
+    public static native void noteOn(int track, int note, float velocity);
 
-    public static native void noteOff(int note);
+    public static native void noteOff(int track, int note);
 
-    public static native void allNotesOff();
+    public static native void allNotesOff(int track);
 
     /**
-     * Voices sounding right now, out of the fixed pool the core was built with.
-     * A meter rather than a synchronisation point: it reads state the audio
-     * thread owns, so the answer is a snapshot that may already be a block old.
-     * That is enough to see voice stealing, which with a small pool happens
+     * Voices sounding right now on one track, out of the fixed pool the core was
+     * built with. A meter rather than a synchronisation point: it reads state the
+     * audio thread owns, so the answer is a snapshot that may already be a block
+     * old. That is enough to see voice stealing, which with a small pool happens
      * constantly and is otherwise invisible.
      */
-    public static native int activeVoices();
+    public static native int activeVoices(int track);
 
     /** norm is [0, 1] and maps onto the parameter's own range and curve. */
-    public static native void setParam(int param, float norm);
+    public static native void setParam(int track, int param, float norm);
 
     /**
      * Frames rendered since the engine started. This is the clock a sequencer
      * schedules against: it advances only as audio is produced, so unlike a
      * wall clock it cannot drift from the stream.
+     *
+     * <p>One clock for every track. Each engine keeps its own, but the callback
+     * renders all of them every time and by the same frame count, so they stay
+     * equal and this answers for all.
      */
     public static native long frameTime();
 
@@ -140,22 +168,86 @@ public final class SynthEngine {
      * Places a note at an exact frame on the {@link #frameTime()} clock, so a
      * step lands on its own frame instead of on a buffer boundary. Returns
      * false when the queue is full, which means either scheduling less far
-     * ahead or building the library with a larger SYNTH_EVENT_QUEUE_LEN.
+     * ahead or building the library with a larger SYNTH_EVENT_QUEUE_LEN. Each
+     * track has its own queue, so one busy track cannot crowd out another.
      *
      * <p>A frame already in the past is played at the start of the next block
      * rather than dropped: a late step recovers, a silent one does not.
      */
-    public static native boolean scheduleNoteOn(long frame, int note, float velocity);
+    public static native boolean scheduleNoteOn(long frame, int track, int note, float velocity);
 
-    public static native boolean scheduleNoteOff(long frame, int note);
+    public static native boolean scheduleNoteOff(long frame, int track, int note);
 
-    public static native boolean scheduleParam(long frame, int param, float norm);
+    public static native boolean scheduleParam(long frame, int track, int param, float norm);
 
-    public static native float getParam(int param);
+    public static native float getParam(int track, int param);
 
     /** Number of parameters the core exposes, for building UI generically. */
     public static native int paramCount();
 
     /** Parameter name, or null if names were compiled out of the core. */
     public static native String paramName(int param);
+
+    /*
+     * The single-engine calls this bridge had before it held several, each one
+     * exactly its track 0 form. An app written against the old signatures keeps
+     * working, on track 0, and nothing here needs the app to know about tracks.
+     * There is no exception to that rule: allNotesOff() silences track 0 and
+     * leaves the rest sounding, so a panic button wants the loop over
+     * trackCount() rather than this.
+     */
+
+    /** @deprecated use {@link #noteOn(int, int, float)}; this is track 0. */
+    @Deprecated
+    public static void noteOn(int note, float velocity) {
+        noteOn(0, note, velocity);
+    }
+
+    /** @deprecated use {@link #noteOff(int, int)}; this is track 0. */
+    @Deprecated
+    public static void noteOff(int note) {
+        noteOff(0, note);
+    }
+
+    /** @deprecated use {@link #allNotesOff(int)}; this is track 0 alone. */
+    @Deprecated
+    public static void allNotesOff() {
+        allNotesOff(0);
+    }
+
+    /** @deprecated use {@link #activeVoices(int)}; this is track 0. */
+    @Deprecated
+    public static int activeVoices() {
+        return activeVoices(0);
+    }
+
+    /** @deprecated use {@link #setParam(int, int, float)}; this is track 0. */
+    @Deprecated
+    public static void setParam(int param, float norm) {
+        setParam(0, param, norm);
+    }
+
+    /** @deprecated use {@link #getParam(int, int)}; this is track 0. */
+    @Deprecated
+    public static float getParam(int param) {
+        return getParam(0, param);
+    }
+
+    /** @deprecated use {@link #scheduleNoteOn(long, int, int, float)}; track 0. */
+    @Deprecated
+    public static boolean scheduleNoteOn(long frame, int note, float velocity) {
+        return scheduleNoteOn(frame, 0, note, velocity);
+    }
+
+    /** @deprecated use {@link #scheduleNoteOff(long, int, int)}; track 0. */
+    @Deprecated
+    public static boolean scheduleNoteOff(long frame, int note) {
+        return scheduleNoteOff(frame, 0, note);
+    }
+
+    /** @deprecated use {@link #scheduleParam(long, int, int, float)}; track 0. */
+    @Deprecated
+    public static boolean scheduleParam(long frame, int param, float norm) {
+        return scheduleParam(frame, 0, param, norm);
+    }
 }

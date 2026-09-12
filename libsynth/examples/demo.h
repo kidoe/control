@@ -53,10 +53,6 @@ static const int k_demo_kicks[] = {
    the whole reason it reads as a drum and not as a low sine beep. */
 #define DEMO_KICK_NOTE 33
 
-/* Frames the two parts are summed in at a time. Any size works; a fixed one
-   keeps the mixing buffer off the heap, which is the point. */
-#define DEMO_MIX_CHUNK 128
-
 /* A synthesized kick: a sine swept quickly down onto a low note, with an
    amplitude envelope short enough that it is over before the note is. */
 static void demo_init_kick(synth_t *s, float sample_rate)
@@ -137,7 +133,6 @@ static void demo_render(demo_t *d, float *out, int frames)
     int done = 0;
 
     while (done < frames) {
-        float drums[DEMO_MIX_CHUNK];
         int chunk = frames - done;
         int i;
 
@@ -147,14 +142,16 @@ static void demo_render(demo_t *d, float *out, int frames)
         if (chunk > d->frames_to_next) {
             chunk = d->frames_to_next;
         }
-        if (chunk > DEMO_MIX_CHUNK) {
-            chunk = DEMO_MIX_CHUNK;
-        }
+        /* Two parts, one buffer, no scratch memory: the lead writes, its own
+           echo runs on it, and then the drums are added on top. An insert
+           effect belongs to one part, so it has to happen before that part
+           joins the mix — which is the whole reason the delay line is the
+           host's to place rather than something inside synth_t. */
         synth_render(d->lead, out + done, chunk);
-        synth_render(d->drums, drums, chunk);
         for (i = 0; i < chunk; ++i) {
-            out[done + i] = synth_delay_next(&d->echo, out[done + i]) + drums[i];
+            out[done + i] = synth_delay_next(&d->echo, out[done + i]);
         }
+        synth_render_add(d->drums, out + done, chunk);
         d->frames_to_next -= chunk;
         done += chunk;
     }

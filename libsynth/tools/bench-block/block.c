@@ -16,7 +16,13 @@
 #include <stdio.h>
 #include <string.h>
 
+/* Four tracks is what a groovebox asks for, and what the Android backend now
+   holds. Each is an instance with its own patch, voices and queue; the host
+   sums them. */
+#define TRACKS 4
+
 static synth_t s;
+static synth_t tracks[TRACKS];
 static float buf[96];
 
 static void schedule(synth_event_type_t type, uint64_t frame, int index, float value)
@@ -30,11 +36,57 @@ static void schedule(synth_event_type_t type, uint64_t frame, int index, float v
     synth_schedule(&s, &e);
 }
 
+/* The mix cases render every track on every callback, silent ones included,
+   because a track skipped is a track whose clock stops. */
+static void render_mix(int n_tracks)
+{
+    int t;
+
+    synth_render(&tracks[0], buf, 96);
+    for (t = 1; t < n_tracks; ++t) {
+        synth_render_add(&tracks[t], buf, 96);
+    }
+}
+
+static int run_mix(const char *what)
+{
+    int voices_each = 2;
+
+    if (strcmp(what, "mix4idle") == 0) {
+        voices_each = 0;
+    } else if (strcmp(what, "mix4full") == 0) {
+        voices_each = SYNTH_MAX_VOICES;
+    }
+    int t, i;
+
+    for (t = 0; t < TRACKS; ++t) {
+        synth_init(&tracks[t], 48000.0f);
+        synth_set_param(&tracks[t], SYNTH_PARAM_AMP_SUSTAIN, 1.0f);
+        for (i = 0; i < voices_each; ++i) {
+            synth_note_on(&tracks[t], 32 + t * 3 + i * 2, 0.9f);
+        }
+    }
+    for (i = 0; i < 50; ++i) {
+        render_mix(TRACKS);
+    }
+
+    CALLGRIND_START_INSTRUMENTATION;
+    render_mix(TRACKS);
+    CALLGRIND_STOP_INSTRUMENTATION;
+
+    printf("%g\n", (double)buf[0]);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *what = (argc > 1) ? argv[1] : "steady";
     uint64_t now;
     int i;
+
+    if (strncmp(what, "mix", 3) == 0) {
+        return run_mix(what);
+    }
 
     synth_init(&s, 48000.0f);
     synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 1.0f);

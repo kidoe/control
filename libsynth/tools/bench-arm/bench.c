@@ -16,6 +16,12 @@
 #ifndef BENCH_SWEEP
 #define BENCH_SWEEP 0
 #endif
+#ifndef BENCH_LFO_CUTOFF
+#define BENCH_LFO_CUTOFF 0
+#endif
+#ifndef BENCH_LFO_PITCH
+#define BENCH_LFO_PITCH 0
+#endif
 
 static synth_t g_synth;
 static float g_block[96];
@@ -41,6 +47,12 @@ int main(void)
 #if BENCH_SWEEP
     synth_set_param(&g_synth, SYNTH_PARAM_PITCH_ENV_AMOUNT, 0.75f);
     synth_set_param(&g_synth, SYNTH_PARAM_PITCH_ENV_DECAY, 0.6f);
+#endif
+#if BENCH_LFO_CUTOFF
+    synth_set_param(&g_synth, SYNTH_PARAM_LFO_TO_CUTOFF, 0.85f);
+#endif
+#if BENCH_LFO_PITCH
+    synth_set_param(&g_synth, SYNTH_PARAM_LFO_TO_PITCH, 0.75f);
 #endif
     for (i = 0; i < BENCH_VOICES; ++i) {
         synth_note_on(&g_synth, 40 + i * 4, 0.9f);

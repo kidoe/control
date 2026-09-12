@@ -68,16 +68,26 @@ jobs:
       - name: The Android bridge must mirror the parameter enum
         run: sh libsynth/tools/check-java-constants.sh libsynth
 
+      - name: The Android bridge must implement what Java declares
+        # The one contract with no compiler behind it: a native method whose C
+        # definition has drifted from its Java signature links, loads, and then
+        # reads its arguments off by one on a real device. javac -h says what
+        # the C has to look like; this diffs that against synth_jni.c and then
+        # compiles the bridge against the JDK's jni.h.
+        run: sh libsynth/tools/check-jni-bridge.sh libsynth
+
       - name: Headers must be usable from C++
         run: |
           cat > /tmp/cpp_check.cpp <<'EOF'
           #include "synth/synth.h"
           int main() {
-              synth_t s;
+              synth_t a, b;
               float block[64];
-              synth_init(&s, 48000.0f);
-              synth_note_on(&s, 60, 1.0f);
-              synth_render(&s, block, 64);
+              synth_init(&a, 48000.0f);
+              synth_init(&b, 48000.0f);
+              synth_note_on(&a, 60, 1.0f);
+              synth_render(&a, block, 64);
+              synth_render_add(&b, block, 64);
               return 0;
           }
           EOF

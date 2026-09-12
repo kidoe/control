@@ -2129,6 +2129,176 @@ static void test_patches_keep_instances_apart(void)
     CHECK(a.voices[0].osc.wave == SYNTH_WAVE_NOISE);
 }
 
+/* A groovebox track is one instance, and the whole point of the mix is that
+   nothing about a part changes because another part is playing beside it. */
+static void test_render_add_mixes_instances(void)
+{
+    synth_t a, b;
+    float solo_a[256], solo_b[256], mix[256];
+    int i;
+
+    synth_init(&a, SR);
+    synth_init(&b, SR);
+    synth_set_param(&a, SYNTH_PARAM_OSC_WAVE, 0.0f);
+    synth_set_param(&b, SYNTH_PARAM_OSC_WAVE,
+                    (float)SYNTH_WAVE_SAW / (float)(SYNTH_WAVE_COUNT - 1));
+    synth_note_on(&a, 48, 1.0f);
+    synth_note_on(&b, 67, 0.6f);
+    synth_render(&a, solo_a, 256);
+    synth_render(&b, solo_b, 256);
+
+    synth_init(&a, SR);
+    synth_init(&b, SR);
+    synth_set_param(&a, SYNTH_PARAM_OSC_WAVE, 0.0f);
+    synth_set_param(&b, SYNTH_PARAM_OSC_WAVE,
+                    (float)SYNTH_WAVE_SAW / (float)(SYNTH_WAVE_COUNT - 1));
+    synth_note_on(&a, 48, 1.0f);
+    synth_note_on(&b, 67, 0.6f);
+    synth_render(&a, mix, 256);
+    synth_render_add(&b, mix, 256);
+
+    /* Bit-identical, not near: mixing is an addition and nothing else, so a
+       part that came out different came out wrong. */
+    for (i = 0; i < 256; ++i) {
+        if (mix[i] != solo_a[i] + solo_b[i]) {
+            CHECK(mix[i] == solo_a[i] + solo_b[i]);
+            break;
+        }
+    }
+}
+
+/* Events split the render at their frames, and each instance splits at its own.
+   Two parts whose steps land on different frames must still mix exactly. */
+static void test_render_add_mixes_across_event_splits(void)
+{
+    synth_t a, b;
+    synth_event_t event;
+    float solo_a[256], solo_b[256], mix[256];
+    int pass, i;
+
+    for (pass = 0; pass < 2; ++pass) {
+        synth_init(&a, SR);
+        synth_init(&b, SR);
+        event.frame = 37;
+        event.type = SYNTH_EVENT_NOTE_ON;
+        event.index = 60;
+        event.value = 1.0f;
+        CHECK(synth_schedule(&a, &event));
+        event.frame = 150;
+        event.index = 64;
+        CHECK(synth_schedule(&b, &event));
+
+        if (pass == 0) {
+            synth_render(&a, solo_a, 256);
+            synth_render(&b, solo_b, 256);
+        } else {
+            synth_render(&a, mix, 256);
+            synth_render_add(&b, mix, 256);
+        }
+    }
+
+    for (i = 0; i < 256; ++i) {
+        if (mix[i] != solo_a[i] + solo_b[i]) {
+            CHECK(mix[i] == solo_a[i] + solo_b[i]);
+            break;
+        }
+    }
+}
+
+static void test_render_add_keeps_what_is_already_in_the_buffer(void)
+{
+    synth_t s;
+    float solo[128], buf[128];
+    int i;
+
+    synth_init(&s, SR);
+    synth_note_on(&s, 60, 1.0f);
+    synth_render(&s, solo, 128);
+
+    synth_init(&s, SR);
+    synth_note_on(&s, 60, 1.0f);
+    for (i = 0; i < 128; ++i) {
+        buf[i] = (float)i * 0.001f;
+    }
+    synth_render_add(&s, buf, 128);
+
+    for (i = 0; i < 128; ++i) {
+        if (buf[i] != (float)i * 0.001f + solo[i]) {
+            CHECK(buf[i] == (float)i * 0.001f + solo[i]);
+            break;
+        }
+    }
+}
+
+/* The other half of the same contract, and the one a wrong flag would break
+   silently: the first part in the mix overwrites, so the host needs no clear. */
+static void test_render_still_overwrites_the_buffer(void)
+{
+    synth_t s;
+    float clean[128], dirty[128];
+    int i;
+
+    synth_init(&s, SR);
+    synth_note_on(&s, 60, 1.0f);
+    synth_render(&s, clean, 128);
+
+    synth_init(&s, SR);
+    synth_note_on(&s, 60, 1.0f);
+    for (i = 0; i < 128; ++i) {
+        dirty[i] = 9.0f;
+    }
+    synth_render(&s, dirty, 128);
+
+    for (i = 0; i < 128; ++i) {
+        if (dirty[i] != clean[i]) {
+            CHECK(dirty[i] == clean[i]);
+            break;
+        }
+    }
+}
+
+/* A part with nothing sounding still has to be rendered, or its clock falls
+   behind the others'. What it must not do is touch the mix. */
+static void test_a_silent_part_costs_the_mix_nothing(void)
+{
+    synth_t s;
+    float buf[64];
+    int i;
+
+    synth_init(&s, SR);
+    for (i = 0; i < 64; ++i) {
+        buf[i] = 0.25f;
+    }
+    synth_render_add(&s, buf, 64);
+
+    for (i = 0; i < 64; ++i) {
+        if (buf[i] != 0.25f) {
+            CHECK(buf[i] == 0.25f);
+            break;
+        }
+    }
+    CHECK(synth_frame_time(&s) == 64);
+}
+
+static void test_render_add_advances_the_clock_like_render(void)
+{
+    synth_t a, b;
+    float buf[96];
+
+    synth_init(&a, SR);
+    synth_init(&b, SR);
+    synth_note_on(&a, 60, 1.0f);
+    synth_note_on(&b, 60, 1.0f);
+    synth_render(&a, buf, 96);
+    synth_render_add(&b, buf, 96);
+    CHECK(synth_frame_time(&a) == synth_frame_time(&b));
+    CHECK(synth_frame_time(&b) == 96);
+
+    /* And an empty request is a no-op for both, clock included. */
+    synth_render_add(&b, buf, 0);
+    CHECK(synth_frame_time(&b) == 96);
+}
+
 static void test_lfo_rate_is_in_hertz(void)
 {
     synth_lfo_t lfo;
@@ -3210,6 +3380,12 @@ int main(void)
     test_a_late_instance_can_join_the_timeline();
     test_instances_do_not_share_scheduled_events();
     test_summed_instances_need_host_headroom();
+    test_render_add_mixes_instances();
+    test_render_add_mixes_across_event_splits();
+    test_render_add_keeps_what_is_already_in_the_buffer();
+    test_render_still_overwrites_the_buffer();
+    test_a_silent_part_costs_the_mix_nothing();
+    test_render_add_advances_the_clock_like_render();
     test_lfo_rate_is_in_hertz();
     test_lfo_shapes();
     test_lfo_defaults_change_nothing();
