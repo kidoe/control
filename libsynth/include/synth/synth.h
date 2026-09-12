@@ -178,6 +178,25 @@ void synth_set_sample_rate(synth_t *s, float sample_rate);
    buffer boundary. */
 void synth_render(synth_t *s, float *out, int n_frames);
 
+/* The same, but added to what is already in `out` rather than replacing it, so
+   several instances mix into one buffer with no scratch memory and nothing
+   allocated on the audio thread. A host with N parts renders the first with
+   synth_render() and the rest with this, which needs no buffer clearing either.
+   Mixing is all it does: level per part is that part's own master gain, and
+   headroom across parts is the host's to keep, since N instances each bounded
+   by 1 reach N.
+
+   Render every part on every callback, including the silent ones. Each clock is
+   this instance's own and only advances inside these two functions, so skipping
+   a part that has nothing to play leaves its frame numbers behind the others' —
+   and then a sequencer scheduling against synth_frame_time() from any of them
+   puts that part's next note in what it believes is the past. A part with no
+   voices sounding is cheap, but it is not free, and the price of that is what
+   buys a single timeline. (The other way out is to render the silent parts
+   nowhere and put them back on the timeline with synth_set_frame_time(), which
+   is exact but leaves their envelopes and delay tails where they stopped.) */
+void synth_render_add(synth_t *s, float *out, int n_frames);
+
 /*
  * Scheduling.
  *

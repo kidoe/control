@@ -629,7 +629,7 @@ static int nonzero(float v)
     return (v > 0.001f) || (v < -0.001f);
 }
 
-static void render_block(synth_t *s, float *out, int n_frames)
+static void render_block(synth_t *s, float *out, int n_frames, int add)
 {
     const float gain = synth_param_denorm(SYNTH_PARAM_MASTER_GAIN, s->params[SYNTH_PARAM_MASTER_GAIN]);
     const synth_filter_mode_t mode =
@@ -700,7 +700,13 @@ static void render_block(synth_t *s, float *out, int n_frames)
             sum += synth_amp_next(&voice->amp, sample, synth_env_next(&voice->amp_env));
         }
 
-        out[i] = sum * gain;
+        /* One branch a frame on a value that cannot change inside the block,
+           which is what buys mixing without a scratch buffer per part. */
+        if (add) {
+            out[i] += sum * gain;
+        } else {
+            out[i] = sum * gain;
+        }
     }
 }
 
@@ -853,7 +859,7 @@ void synth_load_patch_n(synth_t *s, const float *patch, int count)
     }
 }
 
-void synth_render(synth_t *s, float *out, int n_frames)
+static void render_frames(synth_t *s, float *out, int n_frames, int add)
 {
     uint64_t start = s->frame_time; /* only the audio thread touches this */
     int done = 0;
@@ -884,10 +890,20 @@ void synth_render(synth_t *s, float *out, int n_frames)
             break;
         }
 
-        render_block(s, out + done, chunk);
+        render_block(s, out + done, chunk, add);
         done += chunk;
     }
 
     s->frame_time = start + (uint64_t)n_frames;
     clock_publish(&s->clock, s->frame_time);
+}
+
+void synth_render(synth_t *s, float *out, int n_frames)
+{
+    render_frames(s, out, n_frames, 0);
+}
+
+void synth_render_add(synth_t *s, float *out, int n_frames)
+{
+    render_frames(s, out, n_frames, 1);
 }

@@ -44,6 +44,12 @@ away for convenience.
 - **`synth_render()` is the only function for the audio callback**, and it is
   real-time safe. It also drains scheduled events, splitting the block at their
   frame offsets so a sequencer step lands on its own frame.
+  `synth_render_add()` is the same render added to what is already in the buffer
+  instead of replacing it, which is how several instances mix into one buffer
+  with no scratch memory: the first part writes and the rest add, so nothing has
+  to be cleared either. It costs one branch a frame on a value that cannot
+  change inside a block — 290 instructions on a 96-frame block, measured, which
+  is 0.3% of a block with eight voices in it.
 - **`synth_schedule()` is the only function safe to call from another thread.**
   Everything else assumes the caller is the audio thread. It is lock-free and
   never blocks, returning 0 when the fixed-size queue is full. A host driving
@@ -69,12 +75,24 @@ away for convenience.
 
   | one 96-frame block | instructions | of the budget |
   |---|---|---|
-  | nothing sounding | 7,062 | 2.1% |
-  | 8 voices, no events | 104,928 | 31.2% |
-  | 8 voices, one parameter change | 106,666 | 31.7% |
-  | 8 voices, 16 parameter changes | 132,342 | 39.4% |
-  | 8 voices, 8 notes starting | 119,306 | 35.5% |
-  | 8 voices, 16 notes starting | 135,510 | 40.3% |
+  | nothing sounding | 7,352 | 2.2% |
+  | 8 voices, no events | 105,218 | 31.3% |
+  | 8 voices, one parameter change | 106,955 | 31.8% |
+  | 8 voices, 16 parameter changes | 132,617 | 39.5% |
+  | 8 voices, 8 notes starting | 119,589 | 35.6% |
+  | 8 voices, 16 notes starting | 135,785 | 40.4% |
+  | 4 instances mixed, 2 voices each | 127,483 | 37.9% |
+  | 4 instances mixed, every slot full | 420,569 | 125.2% |
+  | 4 instances mixed, all silent | 29,690 | 8.8% |
+
+  The last three rows are the same arithmetic seen from the other side: the same
+  eight sounding voices cost 21% more spread over four instances than gathered
+  in one, because each instance scans all of its slots on every block, and four
+  instances playing nothing at all still cost 8.8% of the budget. Thirty-two
+  voices over four tracks do not fit an M4F at all. On a phone they are nothing,
+  which is why the Android bridge ships four tracks; on an M4F, four tracks want
+  a voice count sized to a track. `SYNTH_MAX_VOICES=4` in the environment re-runs
+  the whole table for such a build.
 
   The map from a parameter to the units it reaches is a switch with no default,
   so `-Wswitch` refuses a parameter nobody has placed in it, and a test checks
@@ -101,26 +119,37 @@ away for convenience.
 A groovebox wants a patch and a voice pool per track. That is several `synth_t`,
 not a channel argument: the engine has no mutable global state at all — the only
 global is the const parameter table, and every translation unit has an empty
-`.bss` — so instances are independent by construction. Each carries its
-own parameters, voices and event queue, and the host sums their outputs.
+`.bss` — so instances are independent by construction. Each carries its own
+parameters, voices and event queue, and the host sums their outputs with
+`synth_render_add()`: the first part writes the buffer, the rest add to it.
 
-Counted with callgrind, at 48 kHz in 96-frame blocks, for one second of audio:
+**Render every part on every callback, the silent ones included.** Each clock is
+that instance's own and advances only inside a render, so a part skipped because
+it had nothing to play falls behind the others — and then a sequencer scheduling
+against `synth_frame_time()` aims that part's next note at a frame it believes
+has already gone by. Skipping silent parts is the optimisation this design
+invites and it is wrong; what it saves is the idle floor below, and what it
+costs is the single timeline the whole sequencer depends on. (`synth_set_frame_time()`
+is the deliberate way back onto the timeline, for a part created mid-session.)
+
+Counted by `tools/bench-instances/run.sh`, at 48 kHz in 96-frame blocks, for one
+second of audio:
 
 | | instructions |
 |---|---|
-| one instance, 8 notes | 50.9 M |
-| eight instances, 1 note each | 80.9 M |
-| eight instances, all silent | 34.4 M |
-| eight instances, 8 notes each (64 voices) | 406.5 M |
+| one instance, 8 notes | 50.1 M |
+| eight instances, 1 note each | 76.2 M |
+| eight instances, all silent | 29.7 M |
+| eight instances, 8 notes each (64 voices) | 401.2 M |
 
-Cost follows sounding voices, not instances: eight notes cost 46.5 M whether
+Cost follows sounding voices, not instances: eight notes cost 46.4 M whether
 they sit in one instance or in eight, once the idle floor is taken off. That
-floor is what an instance costs for existing — 4.3 M a second each, because
+floor is what an instance costs for existing — 3.7 M a second each, because
 every block scans all `SYNTH_MAX_VOICES` slots whether or not they sound. It is
 small beside a sounding voice at 5.8 M, but it is per instance and it is paid
 forever, so size the voice count to what one *track* needs rather than to the
 whole instrument: at `SYNTH_MAX_VOICES=2` the same eight one-note parts cost
-61.6 M instead of 80.9 M, and the idle floor drops from 34.4 M to 14.7 M.
+60.8 M instead of 76.2 M, and the idle floor drops from 29.7 M to 14.0 M.
 
 A patch is exactly the normalized parameters, so `synth_save_patch` and
 `synth_load_patch` move one track's sound around as a plain float array with no
@@ -198,6 +227,11 @@ track or one on the whole mix, and that is the host's arrangement to make;
 putting it in the engine would fix the answer and make a patch carry a buffer
 size. The buffer is the caller's, like the `synth_t` is and for the same reason.
 
+An effect on one track runs on that track's own audio, which means before the
+part joins the mix: render the part, run the delay over its buffer, then
+`synth_render_add()` the next part on top. `examples/demo.h` is exactly that —
+a lead with an echo, a kick without one, one buffer and no scratch memory.
+
 Feedback is the one place in the library where a bounded input would not give a
 bounded signal — with feedback `f` the line settles at `1/(1-f)`, which is 20 at
 the most the control allows — so what goes into the line is clamped to full
@@ -228,7 +262,7 @@ cmake --build build
 cd build && ctest --output-on-failure
 ```
 
-116 test functions, 287 assertions, no audio hardware needed. Spectra are
+122 test functions, 298 assertions, no audio hardware needed. Spectra are
 measured with a Goertzel probe at exact frequencies rather than asserted on the
 shape of the code, so the tests survive refactoring and catch real regressions.
 
@@ -245,12 +279,21 @@ Be honest about this line; a lot of it cannot be checked from a container.
   C++ and a build with parameter names stripped.
 - **Compiles but has never run**: the desktop backend. No sound card in CI.
 - **Runs on a device, per the Groovedroid work, but nothing here proves it**:
-  the Android JNI bridge. Its signatures match what `javac -h` generates and it
-  compiles clean against the real `aaudio/AAudio.h` from three NDK releases,
-  which is all this repository can check without an NDK. Reported working at
-  48 kHz with 96-frame bursts on real hardware; reported failing to open on an
-  API 37 emulator, which is why start() now degrades from exclusive mono rather
-  than giving up. Neither report is reproducible from here.
+  the Android JNI bridge. It holds `SYNTH_TRACKS` engines (4 by default) and
+  mixes them into the one stream, so every control call takes a track index and
+  a patch on one track leaves the others alone. What CI can check without an NDK
+  it now does check, because this is the one contract in the repository with no
+  compiler behind it: `tools/check-jni-bridge.sh` diffs every prototype `javac -h`
+  generates against the definitions in `synth_jni.c` — names, return types and
+  argument types — and then compiles the bridge with the JDK's real `jni.h` and
+  the stand-in AAudio headers in `tools/jni-stubs`, at one, four and eight
+  tracks. A native method whose C side has drifted from its Java signature
+  otherwise links, loads, and reads its arguments off by one on a device: a
+  track index arriving where a note number is expected. What none of that
+  proves is agreement with the real AAudio, or a note coming out of a speaker.
+  Reported working at 48 kHz with 96-frame bursts on real hardware; reported
+  failing to open on an API 37 emulator, which is why start() degrades from
+  exclusive mono rather than giving up. Neither report is reproducible from here.
 - **Cross-compiles and fits, but has never run**: bare metal ARM. CI builds the
   library and `backends/embedded/rp2040_example.c` for Cortex-M0+ and
   Cortex-M4F with `-Wconversion -Werror` and runs the dependency check on both.
@@ -265,13 +308,13 @@ Be honest about this line; a lot of it cannot be checked from a container.
 
   | instructions per second of audio | M4F | M0 |
   |---|---|---|
-  | silent, 8 empty slots | 3.8 M | 13.3 M |
-  | sine, 1 voice | 9.3 M | 153 M |
-  | sine, 8 voices | 47.6 M | 1122 M |
-  | saw, 8 voices | 47.2 M | 896 M |
+  | silent, 8 empty slots | 3.8 M | 12.6 M |
+  | sine, 1 voice | 9.3 M | 152 M |
+  | sine, 8 voices | 47.6 M | 1121 M |
+  | saw, 8 voices | 47.2 M | 895 M |
   | sine, 8 voices + filter LFO | 69.6 M | 1855 M |
-  | sine, 8 voices + vibrato | 69.3 M | 1869 M |
-  | sine, 8 voices + pitch sweep | 74.2 M | 1847 M |
+  | sine, 8 voices + vibrato | 69.3 M | 1868 M |
+  | sine, 8 voices + pitch sweep | 74.2 M | 1846 M |
 
   Read these as a floor. QEMU counts instructions retired, not cycles, and
   models neither flash wait states nor the multi-cycle loads and taken branches
@@ -291,7 +334,7 @@ Be honest about this line; a lot of it cannot be checked from a container.
     47.6 M instructions a second for 8 voices is 28% of a 168 MHz STM32F405 at
     one instruction per cycle. Since that is a floor, treat 8 voices as usable
     and leave room for whatever else the firmware does.
-  - **The Pico is close but not there.** A single sine voice needs 153 M
+  - **The Pico is close but not there.** A single sine voice needs 152 M
     instructions per second of audio, 1.2 times a 125 MHz RP2040 core at one
     instruction per cycle — down from 2.8 times before any of this work.
     Overclocked to 250 MHz one voice fits at 61% of a core at that rate, and

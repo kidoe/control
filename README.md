@@ -100,10 +100,25 @@ landing in the same one take it from 31% of a 168 MHz Cortex-M4F's budget to
 There is no channel argument, because there is no mutable global state: every
 translation unit has an empty `.bss`, and the only global is the const parameter
 table. A groovebox gives each track its own `synth_t` — its own patch, voices
-and event queue — and sums the outputs. Cost follows sounding voices rather than
+and event queue — and sums the outputs:
+
+```c
+synth_render(&drums, out, n_frames);      /* the first part writes */
+synth_render_add(&bass, out, n_frames);   /* the rest add to it */
+synth_render_add(&lead, out, n_frames);
+```
+
+No scratch buffer, nothing to clear, and an effect on one part runs over that
+part's buffer before the next is added. Cost follows sounding voices rather than
 instances: eight notes cost the same whether they sit in one instance or in
-eight, and an instance that is sounding nothing costs 4.3 M instructions a
+eight, and an instance that is sounding nothing costs 3.7 M instructions a
 second for scanning its empty voice slots.
+
+Render every part on every callback, silent ones included. A clock belongs to its
+instance and only advances while that instance renders, so a part skipped for
+having nothing to play falls behind the timeline the sequencer is scheduling all
+of them against — which is the one optimisation this shape invites and should not
+have.
 
 The host owns two things the library cannot pick: the headroom (each instance is
 bounded by 1 on its own, so four in unison reach four) and the clock (each
@@ -115,13 +130,18 @@ instance starts at frame zero, so a part created mid-session needs
 | | how | state |
 |---|---|---|
 | Desktop | miniaudio, `backends/pc/` | builds in CI, never run — no sound card there |
-| Android | AAudio through JNI, `backends/android/` | reported working on hardware at 48 kHz; CI checks the signatures and the headers |
+| Android | AAudio through JNI, `backends/android/`, four tracks mixed | reported working on hardware at 48 kHz; CI diffs every JNI signature against `javac -h` and compiles the bridge |
 | Bare metal | `backends/embedded/rp2040_example.c` | cross-builds and fits; see below |
 
 The Android side is a contract, not a suggestion:
 `backends/android/java/com/kidoe/synth/SynthEngine.java` is the file the app
-talks to, and `tools/check-java-constants.sh` fails CI when its copy of the
-parameter list drifts from the header.
+talks to. It holds four engines, one per track, so every control call takes a
+track index and a patch set on one track leaves the others alone. Two checks
+fail CI when the two languages drift: `tools/check-java-constants.sh` on the
+parameter list, and `tools/check-jni-bridge.sh` on every native method's name,
+return type and arguments — the contract with no compiler behind it, where a
+mismatch means the app reads a track index as a note number on a real device and
+nothing here would have said so.
 
 MIDI lives in its own translation unit (`src/midi.c`), so a target that does not
 want it never links it. It parses bytes, not decoded events, because the same
@@ -148,7 +168,7 @@ program; CI tests 4, 8 and 32.
 The point of this library is portability, so the claims about it are measured
 rather than asserted, and the ones that are not are labelled.
 
-- **Verified here**: the core and its 116 tests, under gcc and clang with
+- **Verified here**: the core and its 122 tests, under gcc and clang with
   `-Wconversion -Werror`, at three voice counts, with the headers compiled as
   C++ and with parameter names stripped. Spectra are measured with a Goertzel
   probe at exact frequencies rather than asserted on the shape of the code, and
@@ -163,7 +183,7 @@ rather than asserted, and the ones that are not are labelled.
 - **Measured on emulated silicon**: `tools/bench-arm/run.sh` renders a second
   of audio on QEMU's Cortex-M0 and Cortex-M4F models and counts instructions
   with a TCG plugin, and a second plugin attributes them to functions. Eight
-  voices cost 47.6 M instructions a second on the M4F and 1122 M on the M0 —
+  voices cost 47.6 M instructions a second on the M4F and 1121 M on the M0 —
   soft float is about 24x the whole render loop, not the modest per-call tax
   the symbol list suggests. So an M4F-class part runs eight voices in under a
   third of a 168 MHz core, while an RP2040 needs 1.2 cores for one voice.

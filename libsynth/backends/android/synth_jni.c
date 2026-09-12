@@ -5,14 +5,36 @@
 #include "synth/synth.h"
 
 /* Android backend: an AAudio stream whose data callback feeds the core. As on
-   every other target, nothing below this file knows what platform it is on. */
+   every other target, nothing below this file knows what platform it is on.
+
+   One stream, several engines. A groovebox wants a patch and a voice pool per
+   track, and the core has no channel argument for that: it has instances. So
+   this file holds SYNTH_TRACKS of them, gives every control call a track index,
+   and sums their outputs into the stream's buffer. The engines are independent
+   by construction — the only global in the library is a const table — so the
+   only thing shared here is the buffer they mix into. */
+
+#ifndef SYNTH_TRACKS
+#define SYNTH_TRACKS 4
+#endif
 
 #define LOG_TAG "libsynth"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-static synth_t g_synth;
+/* The mix starts by writing with track 0, so there has to be one. Checked here
+   rather than left to whatever a zero-length array does. */
+typedef char synth_tracks_must_be_at_least_one[(SYNTH_TRACKS >= 1) ? 1 : -1];
+
+static synth_t g_tracks[SYNTH_TRACKS];
 static AAudioStream *g_stream;
 static int g_channels = 1;
+
+/* A track index arrives from app code, so it is checked rather than trusted:
+   out of range answers "no such track" instead of reading past the array. */
+static synth_t *track_at(jint track)
+{
+    return (track >= 0 && track < SYNTH_TRACKS) ? &g_tracks[track] : 0;
+}
 
 static aaudio_data_callback_result_t audio_callback(AAudioStream *stream, void *user_data,
                                                     void *audio_data, int32_t num_frames)
@@ -21,15 +43,26 @@ static aaudio_data_callback_result_t audio_callback(AAudioStream *stream, void *
     int channels = g_channels;
     int frame;
     int channel;
+    int track;
 
     (void)stream;
     (void)user_data;
 
-    synth_render(&g_synth, out, (int)num_frames);
+    /* The first track writes and the rest add, so the mix needs no scratch
+       buffer and no clearing of this one. Every track renders, silent ones
+       included: each engine's clock advances only while it is rendering, so a
+       track skipped here would fall behind the timeline the sequencer is
+       scheduling all of them against. */
+    synth_render(&g_tracks[0], out, (int)num_frames);
+    for (track = 1; track < SYNTH_TRACKS; ++track) {
+        synth_render_add(&g_tracks[track], out, (int)num_frames);
+    }
 
-    /* The engine is mono but the device decides how many channels it grants.
+    /* The engines are mono and the device decides how many channels it grants.
        Expanding from the back lets the same buffer hold both, with no scratch
-       memory and no allocation on the audio thread. */
+       memory and no allocation on the audio thread. It has to come after the
+       mix, not per track: a track added to an already-expanded buffer would
+       land on the left channel alone. */
     for (frame = (int)num_frames - 1; channels > 1 && frame >= 0; --frame) {
         float sample = out[frame];
 
@@ -56,12 +89,16 @@ static void error_callback(AAudioStream *stream, void *user_data, aaudio_result_
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved)
 {
+    int track;
+
     (void)vm;
     (void)reserved;
 
-    /* Valid engine before any stream exists, so notes and parameters set
+    /* Valid engines before any stream exists, so notes and parameters set
        ahead of start() are never applied to uninitialised memory. */
-    synth_init(&g_synth, 48000.0f);
+    for (track = 0; track < SYNTH_TRACKS; ++track) {
+        synth_init(&g_tracks[track], 48000.0f);
+    }
     return JNI_VERSION_1_6;
 }
 
@@ -71,6 +108,7 @@ JNIEXPORT jboolean JNICALL Java_com_kidoe_synth_SynthEngine_start(JNIEnv *env, j
     aaudio_result_t result;
     int32_t burst;
     int attempt;
+    int track;
 
     (void)env;
     (void)clazz;
@@ -119,8 +157,11 @@ JNIEXPORT jboolean JNICALL Java_com_kidoe_synth_SynthEngine_start(JNIEnv *env, j
     }
 
     /* The device grants whatever rate it likes, so retune before it can run.
-       This keeps parameters the app already set. */
-    synth_set_sample_rate(&g_synth, (float)AAudioStream_getSampleRate(g_stream));
+       This keeps parameters the app already set. Every track, and before
+       requestStart(), because the callback reads all of them. */
+    for (track = 0; track < SYNTH_TRACKS; ++track) {
+        synth_set_sample_rate(&g_tracks[track], (float)AAudioStream_getSampleRate(g_stream));
+    }
 
     burst = AAudioStream_getFramesPerBurst(g_stream);
     AAudioStream_setBufferSizeInFrames(g_stream, burst * 2);
@@ -162,60 +203,80 @@ JNIEXPORT jint JNICALL Java_com_kidoe_synth_SynthEngine_sampleRate(JNIEnv *env, 
    one, while the audio callback is rendering; synth_schedule is the only entry
    point in the library safe to call from there. Frame 0 is always in the past,
    so such an event is applied at the top of the next block. */
-static jboolean enqueue(synth_event_type_t type, uint64_t frame, int index, float value)
+static jboolean enqueue(jint track, synth_event_type_t type, uint64_t frame,
+                        int index, float value)
 {
+    synth_t *s = track_at(track);
     synth_event_t event;
 
+    if (!s) {
+        return JNI_FALSE;
+    }
     event.frame = frame;
     event.type = type;
     event.index = index;
     event.value = value;
-    return synth_schedule(&g_synth, &event) ? JNI_TRUE : JNI_FALSE;
+    return synth_schedule(s, &event) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jint JNICALL Java_com_kidoe_synth_SynthEngine_trackCount(JNIEnv *env, jclass clazz)
+{
+    (void)env;
+    (void)clazz;
+
+    return (jint)SYNTH_TRACKS;
 }
 
 JNIEXPORT void JNICALL Java_com_kidoe_synth_SynthEngine_noteOn(JNIEnv *env, jclass clazz,
-                                                               jint note, jfloat velocity)
+                                                               jint track, jint note,
+                                                               jfloat velocity)
 {
     (void)env;
     (void)clazz;
 
-    enqueue(SYNTH_EVENT_NOTE_ON, 0, (int)note, (float)velocity);
+    enqueue(track, SYNTH_EVENT_NOTE_ON, 0, (int)note, (float)velocity);
 }
 
-JNIEXPORT void JNICALL Java_com_kidoe_synth_SynthEngine_noteOff(JNIEnv *env, jclass clazz, jint note)
+JNIEXPORT void JNICALL Java_com_kidoe_synth_SynthEngine_noteOff(JNIEnv *env, jclass clazz,
+                                                                jint track, jint note)
 {
     (void)env;
     (void)clazz;
 
-    enqueue(SYNTH_EVENT_NOTE_OFF, 0, (int)note, 0.0f);
+    enqueue(track, SYNTH_EVENT_NOTE_OFF, 0, (int)note, 0.0f);
 }
 
-JNIEXPORT void JNICALL Java_com_kidoe_synth_SynthEngine_allNotesOff(JNIEnv *env, jclass clazz)
+JNIEXPORT void JNICALL Java_com_kidoe_synth_SynthEngine_allNotesOff(JNIEnv *env, jclass clazz,
+                                                                    jint track)
 {
     (void)env;
     (void)clazz;
 
-    enqueue(SYNTH_EVENT_ALL_NOTES_OFF, 0, 0, 0.0f);
+    enqueue(track, SYNTH_EVENT_ALL_NOTES_OFF, 0, 0, 0.0f);
 }
 
-JNIEXPORT jint JNICALL Java_com_kidoe_synth_SynthEngine_activeVoices(JNIEnv *env, jclass clazz)
+JNIEXPORT jint JNICALL Java_com_kidoe_synth_SynthEngine_activeVoices(JNIEnv *env, jclass clazz,
+                                                                     jint track)
 {
+    const synth_t *s = track_at(track);
+
     (void)env;
     (void)clazz;
 
     /* Reads voice state the audio thread owns. Nothing here can tear a value
        that matters: the worst case is a count taken across a block boundary,
        which is what a meter is anyway. */
-    return (jint)synth_active_voices(&g_synth);
+    return s ? (jint)synth_active_voices(s) : 0;
 }
 
 JNIEXPORT void JNICALL Java_com_kidoe_synth_SynthEngine_setParam(JNIEnv *env, jclass clazz,
-                                                                 jint param, jfloat norm)
+                                                                 jint track, jint param,
+                                                                 jfloat norm)
 {
     (void)env;
     (void)clazz;
 
-    enqueue(SYNTH_EVENT_PARAM, 0, (int)param, (float)norm);
+    enqueue(track, SYNTH_EVENT_PARAM, 0, (int)param, (float)norm);
 }
 
 JNIEXPORT jlong JNICALL Java_com_kidoe_synth_SynthEngine_frameTime(JNIEnv *env, jclass clazz)
@@ -223,7 +284,11 @@ JNIEXPORT jlong JNICALL Java_com_kidoe_synth_SynthEngine_frameTime(JNIEnv *env, 
     (void)env;
     (void)clazz;
 
-    return (jlong)synth_frame_time(&g_synth);
+    /* One clock for every track, because the callback renders all of them every
+       time and each advances by the same frame count. Track 0 answers for all;
+       if one of them ever stopped being rendered, this would stop being true
+       and every step scheduled after it would be aimed at the wrong frame. */
+    return (jlong)synth_frame_time(&g_tracks[0]);
 }
 
 JNIEXPORT jint JNICALL Java_com_kidoe_synth_SynthEngine_framesPerBurst(JNIEnv *env, jclass clazz)
@@ -235,38 +300,41 @@ JNIEXPORT jint JNICALL Java_com_kidoe_synth_SynthEngine_framesPerBurst(JNIEnv *e
 }
 
 JNIEXPORT jboolean JNICALL Java_com_kidoe_synth_SynthEngine_scheduleNoteOn(
-    JNIEnv *env, jclass clazz, jlong frame, jint note, jfloat velocity)
+    JNIEnv *env, jclass clazz, jlong frame, jint track, jint note, jfloat velocity)
 {
     (void)env;
     (void)clazz;
 
-    return enqueue(SYNTH_EVENT_NOTE_ON, (uint64_t)frame, (int)note, (float)velocity);
+    return enqueue(track, SYNTH_EVENT_NOTE_ON, (uint64_t)frame, (int)note, (float)velocity);
 }
 
 JNIEXPORT jboolean JNICALL Java_com_kidoe_synth_SynthEngine_scheduleNoteOff(
-    JNIEnv *env, jclass clazz, jlong frame, jint note)
+    JNIEnv *env, jclass clazz, jlong frame, jint track, jint note)
 {
     (void)env;
     (void)clazz;
 
-    return enqueue(SYNTH_EVENT_NOTE_OFF, (uint64_t)frame, (int)note, 0.0f);
+    return enqueue(track, SYNTH_EVENT_NOTE_OFF, (uint64_t)frame, (int)note, 0.0f);
 }
 
 JNIEXPORT jboolean JNICALL Java_com_kidoe_synth_SynthEngine_scheduleParam(
-    JNIEnv *env, jclass clazz, jlong frame, jint param, jfloat norm)
+    JNIEnv *env, jclass clazz, jlong frame, jint track, jint param, jfloat norm)
 {
     (void)env;
     (void)clazz;
 
-    return enqueue(SYNTH_EVENT_PARAM, (uint64_t)frame, (int)param, (float)norm);
+    return enqueue(track, SYNTH_EVENT_PARAM, (uint64_t)frame, (int)param, (float)norm);
 }
 
-JNIEXPORT jfloat JNICALL Java_com_kidoe_synth_SynthEngine_getParam(JNIEnv *env, jclass clazz, jint param)
+JNIEXPORT jfloat JNICALL Java_com_kidoe_synth_SynthEngine_getParam(JNIEnv *env, jclass clazz,
+                                                                   jint track, jint param)
 {
+    const synth_t *s = track_at(track);
+
     (void)env;
     (void)clazz;
 
-    return (jfloat)synth_get_param(&g_synth, (synth_param_t)param);
+    return s ? (jfloat)synth_get_param(s, (synth_param_t)param) : 0.0f;
 }
 
 JNIEXPORT jint JNICALL Java_com_kidoe_synth_SynthEngine_paramCount(JNIEnv *env, jclass clazz)
