@@ -2420,6 +2420,44 @@ static void test_a_silent_part_costs_the_mix_nothing(void)
     CHECK(synth_frame_time(&s) == 64);
 }
 
+/* Silence is not free of consequences: the counter that paces control-rate work
+   runs off the frame clock, so a block with nothing sounding still has to move
+   it. Skipping that is invisible until a note starts, and then it retunes on the
+   wrong frame — which is why this is pinned by a property rather than by a
+   number. Silence of a whole number of control ticks leaves the pacing where it
+   was; one frame more does not. */
+static void render_after_silence(float *out, int frames, int gap)
+{
+    synth_t s;
+    static float scratch[512];
+
+    synth_init(&s, SR);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_ENV_AMOUNT, 0.85f);
+    synth_set_param(&s, SYNTH_PARAM_FILTER_KEY_TRACK, 0.7f);
+    synth_set_param(&s, SYNTH_PARAM_LFO_TO_CUTOFF, 0.8f);
+    synth_set_param(&s, SYNTH_PARAM_LFO_RATE, 0.7f);
+    synth_set_param(&s, SYNTH_PARAM_AMP_SUSTAIN, 0.9f);
+
+    if (gap > 512) {
+        gap = 512;
+    }
+    synth_render(&s, scratch, gap);
+    synth_note_on(&s, 57, 0.9f);
+    synth_render(&s, out, frames);
+}
+
+static void test_silence_still_paces_the_control_rate(void)
+{
+    static float same_phase[192], shifted[192], reference[192];
+
+    render_after_silence(reference, 192, 1);
+    render_after_silence(same_phase, 192, 1 + SYNTH_MOD_INTERVAL);
+    render_after_silence(shifted, 192, 2);
+
+    CHECK(memcmp(reference, same_phase, sizeof reference) == 0);
+    CHECK(memcmp(reference, shifted, sizeof reference) != 0);
+}
+
 static void test_render_add_advances_the_clock_like_render(void)
 {
     synth_t a, b;
@@ -3780,6 +3818,7 @@ int main(void)
     test_render_still_overwrites_the_buffer();
     test_a_silent_part_costs_the_mix_nothing();
     test_render_add_advances_the_clock_like_render();
+    test_silence_still_paces_the_control_rate();
     test_lfo_rate_is_in_hertz();
     test_lfo_shapes();
     test_lfo_defaults_change_nothing();

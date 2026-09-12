@@ -129,14 +129,15 @@ synth_render_add(&lead, out, n_frames);
 No scratch buffer, nothing to clear, and an effect on one part runs over that
 part's buffer before the next is added. Cost follows sounding voices rather than
 instances: eight notes cost the same whether they sit in one instance or in
-eight, and an instance that is sounding nothing costs 3.7 M instructions a
-second for scanning its empty voice slots.
+eight, and an instance with nothing sounding at all costs 0.07 M instructions a
+second: it decides that once for the block instead of looking at every slot on
+every frame.
 
 Render every part on every callback, silent ones included. A clock belongs to its
 instance and only advances while that instance renders, so a part skipped for
 having nothing to play falls behind the timeline the sequencer is scheduling all
 of them against — which is the one optimisation this shape invites and should not
-have.
+have. It is also the one worth least: a silent part is 0.1% of a 2 ms block.
 
 The host owns two things the library cannot pick: the headroom (each instance is
 bounded by 1 on its own, so four in unison reach four) and the clock (each
@@ -186,7 +187,7 @@ program; CI tests 4, 8 and 32.
 The point of this library is portability, so the claims about it are measured
 rather than asserted, and the ones that are not are labelled.
 
-- **Verified here**: the core and its 130 tests, under gcc and clang with
+- **Verified here**: the core and its 132 tests, under gcc and clang with
   `-Wconversion -Werror`, at three voice counts, with the headers compiled as
   C++ and with parameter names stripped. Spectra are measured with a Goertzel
   probe at exact frequencies rather than asserted on the shape of the code, and

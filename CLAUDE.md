@@ -87,27 +87,29 @@ away for convenience.
 
   | one 96-frame block | instructions | of the budget |
   |---|---|---|
-  | nothing sounding | 7,369 | 2.2% |
-  | 8 voices, no events | 105,235 | 31.3% |
-  | 8 voices, one parameter change | 106,972 | 31.8% |
-  | 8 voices, 16 parameter changes | 132,634 | 39.5% |
-  | 8 voices, every parameter as an event | 254,015 | 75.6% |
-  | 8 voices, a whole patch adopted | 209,595 | 62.4% |
-  | 8 voices, 8 notes starting | 117,865 | 35.1% |
-  | 8 voices, 16 notes starting | 132,280 | 39.4% |
-  | 4 instances mixed, 2 voices each | 127,584 | 38.0% |
-  | 4 instances mixed, every slot full | 420,670 | 125.2% |
-  | 4 instances, all four adopt a patch | 234,219 | 69.7% |
-  | 4 instances mixed, all silent | 29,791 | 8.9% |
+  | nothing sounding | 201 | 0.1% |
+  | 8 voices, no events | 105,152 | 31.3% |
+  | 8 voices, one parameter change | 106,917 | 31.8% |
+  | 8 voices, 16 parameter changes | 132,987 | 39.6% |
+  | 8 voices, every parameter as an event | 254,148 | 75.6% |
+  | 8 voices, a whole patch adopted | 209,512 | 62.4% |
+  | 8 voices, 8 notes starting | 117,914 | 35.1% |
+  | 8 voices, 16 notes starting | 132,473 | 39.4% |
+  | 4 instances mixed, 2 voices each | 127,252 | 37.9% |
+  | 4 instances mixed, every slot full | 420,338 | 125.1% |
+  | 4 instances, all four adopt a patch | 233,887 | 69.6% |
+  | 4 instances mixed, all silent | 678 | 0.2% |
 
   The instance rows are the same arithmetic seen from the other side: the same
   eight sounding voices cost 21% more spread over four instances than gathered
-  in one, because each instance scans all of its slots on every block, and four
-  instances playing nothing at all still cost 8.9% of the budget. Thirty-two
-  voices over four tracks do not fit an M4F at all. On a phone they are nothing,
-  which is why the Android bridge ships four tracks; on an M4F, four tracks want
-  a voice count sized to a track. `SYNTH_MAX_VOICES=4` in the environment re-runs
-  the whole table for such a build.
+  in one, because an instance with anything sounding scans all of its slots on
+  every frame. An instance with *nothing* sounding does not: the question is
+  asked once for the block instead of 768 times, which is the difference between
+  8.9% of the budget for four silent tracks and 0.2%. Thirty-two voices over four
+  tracks do not fit an M4F at all. On a phone they are nothing, which is why the
+  Android bridge ships four tracks; on an M4F, four tracks want a voice count
+  sized to a track. `SYNTH_MAX_VOICES=4` in the environment re-runs the whole
+  table for such a build.
 
   Those rows hold every slot sounding, which is the expensive end and not the
   usual one. **A kit change costs what the voices it can be heard in cost**, and
@@ -155,7 +157,8 @@ away for convenience.
   by re-loading the whole patch.
 - **What reaches nothing is not computed.** This is the rule the library keeps
   finding new places to apply: a modulation depth at its centre, a parameter
-  change aimed at a voice slot nobody can hear, a wave terrain's cross-section
+  change aimed at a voice slot nobody can hear, a whole block in which nothing
+  sounds, a wave terrain's cross-section
   when the terrain is not the selected waveform, and the two waveform
   derivations that follow the pitch — the VOSIM pulse layout and the phase
   distortion's knee — when their waveform is not the one playing. That last one
@@ -201,19 +204,25 @@ second of audio:
 
 | | instructions |
 |---|---|
-| one instance, 8 notes | 50.1 M |
-| eight instances, 1 note each | 76.2 M |
-| eight instances, all silent | 29.7 M |
-| eight instances, 8 notes each (64 voices) | 401.2 M |
+| one instance, 8 notes | 50.0 M |
+| eight instances, 1 note each | 75.8 M |
+| eight instances, all silent | 0.56 M |
+| eight instances, 8 notes each (64 voices) | 400.9 M |
 
-Cost follows sounding voices, not instances: eight notes cost 46.4 M whether
-they sit in one instance or in eight, once the idle floor is taken off. That
-floor is what an instance costs for existing — 3.7 M a second each, because
-every block scans all `SYNTH_MAX_VOICES` slots whether or not they sound. It is
-small beside a sounding voice at 5.8 M, but it is per instance and it is paid
-forever, so size the voice count to what one *track* needs rather than to the
-whole instrument: at `SYNTH_MAX_VOICES=2` the same eight one-note parts cost
-60.8 M instead of 76.2 M, and the idle floor drops from 29.7 M to 14.0 M.
+Cost follows sounding voices, not instances: eight notes cost 46.3 M whether
+they sit in one instance or in eight, once the slot scan is taken off. That scan
+is what an instance costs *while something in it sounds* — 3.7 M a second,
+because every frame looks at all `SYNTH_MAX_VOICES` slots to find the ones that
+do. It is small beside a sounding voice at 5.8 M, but it is per instance, so
+size the voice count to what one *track* needs rather than to the whole
+instrument: at `SYNTH_MAX_VOICES=2` the same eight one-note parts cost 60.8 M
+instead of 75.8 M.
+
+An instance with nothing sounding at all is a different matter and nearly free —
+0.07 M a second, 53 times less than it used to be — because the frame loop is
+skipped entirely rather than scanning slots that cannot contribute. That is what
+makes the rule above cheap to obey: rendering the silent parts, which is what
+keeps every part on one timeline, now costs almost nothing.
 
 A patch is exactly the normalized parameters, so `synth_save_patch` and
 `synth_load_patch` move one track's sound around as a plain float array with no
@@ -345,7 +354,7 @@ cmake --build build
 cd build && ctest --output-on-failure
 ```
 
-130 test functions, 332 assertions, no audio hardware needed. Spectra are
+132 test functions, 343 assertions, no audio hardware needed. Spectra are
 measured with a Goertzel probe at exact frequencies rather than asserted on the
 shape of the code, so the tests survive refactoring and catch real regressions.
 
@@ -380,7 +389,7 @@ Be honest about this line; a lot of it cannot be checked from a container.
 - **Cross-compiles and fits, but has never run**: bare metal ARM. CI builds the
   library and `backends/embedded/rp2040_example.c` for Cortex-M0+ and
   Cortex-M4F with `-Wconversion -Werror` and runs the dependency check on both.
-  Measured at 8 voices: 10.2 KB of flash and 5.1 KB of RAM on M0+, 9.4 KB and
+  Measured at 8 voices: 10.3 KB of flash and 5.1 KB of RAM on M0+, 9.5 KB and
   5.1 KB on M4F. Two of those translation units are optional and a target that
   leaves them out pays neither: the delay line is 0.6 KB and 0.5 KB of that
   flash, and the patch queue 0.18 KB and 0.16 KB plus 288 bytes of RAM per track
@@ -393,13 +402,20 @@ Be honest about this line; a lot of it cannot be checked from a container.
 
   | instructions per second of audio | M4F | M0 |
   |---|---|---|
-  | silent, 8 empty slots | 3.8 M | 12.6 M |
-  | sine, 1 voice | 9.2 M | 152 M |
-  | sine, 8 voices | 47.2 M | 1121 M |
-  | saw, 8 voices | 46.8 M | 895 M |
+  | silent, 8 empty slots | 0.3 M | 0.4 M |
+  | sine, 1 voice | 9.3 M | 153 M |
+  | sine, 8 voices | 47.2 M | 1122 M |
+  | saw, 8 voices | 46.8 M | 896 M |
   | sine, 8 voices + filter LFO | 69.2 M | 1855 M |
-  | sine, 8 voices + vibrato | 60.6 M | 1532 M |
-  | sine, 8 voices + pitch sweep | 65.8 M | 1522 M |
+  | sine, 8 voices + vibrato | 60.6 M | 1534 M |
+  | sine, 8 voices + pitch sweep | 65.8 M | 1523 M |
+
+  The silent row is 13x lower on the M4F and 30x on the M0 than it was, because
+  a block with nothing sounding no longer walks its voice slots frame by frame.
+  The M0's other rows are 0.1% higher than before that change: asking the
+  question costs a little where the answer is yes, and the code it moved shifted
+  what the compiler could keep in registers. It is a trade this library will take
+  every time — a groovebox has more silent tracks than sounding ones.
 
   Read these as a floor. QEMU counts instructions retired, not cycles, and
   models neither flash wait states nor the multi-cycle loads and taken branches
