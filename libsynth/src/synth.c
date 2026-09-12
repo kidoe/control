@@ -170,13 +170,18 @@ static void terrain_refresh(synth_t *s)
 
 static void voice_apply_osc(synth_t *s, synth_voice_t *v)
 {
-    v->osc.wave = (synth_wave_t)synth_param_denorm(SYNTH_PARAM_OSC_WAVE, s->params[SYNTH_PARAM_OSC_WAVE]);
+    /* The settings first and the waveform last, because each setter derives only
+       while its own waveform is the selected one: this way a switch derives the
+       waveform being switched to, once, from settings already in place. */
     synth_osc_set_pd_knee(&v->osc,
                           synth_param_denorm(SYNTH_PARAM_PD_KNEE, s->params[SYNTH_PARAM_PD_KNEE]));
     synth_osc_set_vosim(&v->osc,
                         synth_param_denorm(SYNTH_PARAM_VOSIM_FORMANT, s->params[SYNTH_PARAM_VOSIM_FORMANT]),
                         (int)synth_param_denorm(SYNTH_PARAM_VOSIM_PULSES, s->params[SYNTH_PARAM_VOSIM_PULSES]),
                         synth_param_denorm(SYNTH_PARAM_VOSIM_DECAY, s->params[SYNTH_PARAM_VOSIM_DECAY]));
+    synth_osc_set_wave(&v->osc,
+                       (synth_wave_t)synth_param_denorm(SYNTH_PARAM_OSC_WAVE,
+                                                        s->params[SYNTH_PARAM_OSC_WAVE]));
     /* Four floats copied, not a lap of the orbit: the instance derived it once in
        terrain_refresh(). Deriving it per voice was the same answer computed
        SYNTH_MAX_VOICES times, 328,000 instructions for one move of either

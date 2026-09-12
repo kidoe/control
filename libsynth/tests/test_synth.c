@@ -173,7 +173,7 @@ static void render_osc(float *buf, float freq, synth_wave_t wave)
     int i;
 
     synth_osc_init(&osc, SR);
-    osc.wave = wave;
+    synth_osc_set_wave(&osc, wave);
     synth_osc_set_freq(&osc, freq);
     for (i = 0; i < ALIAS_FRAMES; ++i) {
         buf[i] = synth_osc_next(&osc);
@@ -236,7 +236,7 @@ static void test_phase_distortion_neutral_at_half(void)
 
     /* A knee at 0.5 leaves the phase ramp linear, so PD must be a plain sine. */
     synth_osc_init(&osc, SR);
-    osc.wave = SYNTH_WAVE_PD;
+    synth_osc_set_wave(&osc, SYNTH_WAVE_PD);
     synth_osc_set_pd_knee(&osc, 0.5f);
     synth_osc_set_freq(&osc, 440.0f);
     for (i = 0; i < ALIAS_FRAMES; ++i) {
@@ -262,7 +262,7 @@ static void test_phase_distortion_adds_harmonics(void)
     int i;
 
     synth_osc_init(&osc, SR);
-    osc.wave = SYNTH_WAVE_PD;
+    synth_osc_set_wave(&osc, SYNTH_WAVE_PD);
     synth_osc_set_pd_knee(&osc, 0.08f);
     synth_osc_set_freq(&osc, 220.0f);
     for (i = 0; i < ALIAS_FRAMES; ++i) {
@@ -295,7 +295,7 @@ static void test_phase_distortion_is_centred(void)
         int whole = (ALIAS_FRAMES / period) * period; /* a partial period would bias the mean */
 
         synth_osc_init(&osc, SR);
-        osc.wave = SYNTH_WAVE_PD;
+        synth_osc_set_wave(&osc, SYNTH_WAVE_PD);
         synth_osc_set_pd_knee(&osc, knees[k]);
         synth_osc_set_freq(&osc, 100.0f);
         for (i = 0; i < ALIAS_FRAMES; ++i) {
@@ -341,7 +341,7 @@ static void render_vosim(float *buf, float f0, float formant, int pulses, float 
     int i;
 
     synth_osc_init(&osc, SR);
-    osc.wave = SYNTH_WAVE_VOSIM;
+    synth_osc_set_wave(&osc, SYNTH_WAVE_VOSIM);
     synth_osc_set_vosim(&osc, formant, pulses, decay);
     synth_osc_set_freq(&osc, f0);
     for (i = 0; i < ALIAS_FRAMES; ++i) {
@@ -425,6 +425,60 @@ static void test_vosim_pulses_cannot_overflow_the_period(void)
     }
 }
 
+/* The two pitch-dependent derivations are kept current only for the waveform
+   that is playing, which is what makes a retune cheap for a sine. The price is
+   that switching to one of them has to derive it from the pitch and the settings
+   as they are now, not as they were when that waveform was last selected. Both
+   halves of this are a silent wrong note if they break: a VOSIM burst laid out
+   for the wrong fundamental, or a phase-distortion knee narrow enough to alias
+   at a pitch it was never checked against. */
+static void test_switching_to_a_waveform_derives_it_at_the_pitch_it_finds(void)
+{
+    synth_osc_t direct, switched;
+
+    /* VOSIM throughout, against VOSIM interrupted by a sine while both the pitch
+       and the pulse settings move. */
+    synth_osc_init(&direct, SR);
+    synth_osc_set_wave(&direct, SYNTH_WAVE_VOSIM);
+    synth_osc_set_vosim(&direct, 900.0f, 3, 0.5f);
+    synth_osc_set_freq(&direct, 220.0f);
+
+    synth_osc_init(&switched, SR);
+    synth_osc_set_wave(&switched, SYNTH_WAVE_VOSIM);
+    synth_osc_set_vosim(&switched, 400.0f, 6, 0.1f);
+    synth_osc_set_freq(&switched, 110.0f);
+    synth_osc_set_wave(&switched, SYNTH_WAVE_SINE);
+    synth_osc_set_vosim(&switched, 900.0f, 3, 0.5f);
+    synth_osc_set_freq(&switched, 220.0f);
+    synth_osc_set_wave(&switched, SYNTH_WAVE_VOSIM);
+
+    CHECK(switched.pulse_rate == direct.pulse_rate);
+    CHECK(switched.vosim_dc == direct.vosim_dc);
+    CHECK(switched.vosim_fitting == direct.vosim_fitting);
+
+    /* And the knee, which is widened by the pitch rather than taken as asked. */
+    synth_osc_init(&direct, SR);
+    synth_osc_set_wave(&direct, SYNTH_WAVE_PD);
+    synth_osc_set_pd_knee(&direct, 0.06f);
+    synth_osc_set_freq(&direct, 1500.0f);
+
+    synth_osc_init(&switched, SR);
+    synth_osc_set_wave(&switched, SYNTH_WAVE_PD);
+    synth_osc_set_pd_knee(&switched, 0.5f);
+    synth_osc_set_freq(&switched, 110.0f);
+    synth_osc_set_wave(&switched, SYNTH_WAVE_SAW);
+    synth_osc_set_pd_knee(&switched, 0.06f);
+    synth_osc_set_freq(&switched, 1500.0f);
+    synth_osc_set_wave(&switched, SYNTH_WAVE_PD);
+
+    CHECK(switched.pd_knee == direct.pd_knee);
+    CHECK(switched.pd_rise == direct.pd_rise);
+    CHECK(switched.pd_fall == direct.pd_fall);
+    CHECK(switched.pd_scale == direct.pd_scale);
+    CHECK(switched.pd_offset == direct.pd_offset);
+    CHECK(direct.pd_knee > 0.06f); /* the pitch really did widen it */
+}
+
 static void test_terrain_is_centred_and_bounded(void)
 {
     static float buf[ALIAS_FRAMES];
@@ -443,7 +497,7 @@ static void test_terrain_is_centred_and_bounded(void)
             float top = 0.0f;
 
             synth_osc_init(&osc, SR);
-            osc.wave = SYNTH_WAVE_TERRAIN;
+            synth_osc_set_wave(&osc, SYNTH_WAVE_TERRAIN);
             synth_osc_set_terrain(&osc, radii[r], ratios[q]);
             synth_osc_set_freq(&osc, 100.0f);
             for (i = 0; i < ALIAS_FRAMES; ++i) {
@@ -473,7 +527,7 @@ static void test_terrain_radius_changes_the_spectrum(void)
     /* The same surface read on a wider orbit is a different waveform, not a
        louder one: the orbit radius is a timbre control. */
     synth_osc_init(&osc, SR);
-    osc.wave = SYNTH_WAVE_TERRAIN;
+    synth_osc_set_wave(&osc, SYNTH_WAVE_TERRAIN);
     synth_osc_set_terrain(&osc, 0.15f, 1);
     synth_osc_set_freq(&osc, 200.0f);
     for (i = 0; i < ALIAS_FRAMES; ++i) {
@@ -481,7 +535,7 @@ static void test_terrain_radius_changes_the_spectrum(void)
     }
 
     synth_osc_init(&osc, SR);
-    osc.wave = SYNTH_WAVE_TERRAIN;
+    synth_osc_set_wave(&osc, SYNTH_WAVE_TERRAIN);
     synth_osc_set_terrain(&osc, 0.95f, 1);
     synth_osc_set_freq(&osc, 200.0f);
     for (i = 0; i < ALIAS_FRAMES; ++i) {
@@ -553,7 +607,7 @@ static void test_terrain_ratio_changes_the_waveform(void)
 
     /* A Lissajous orbit closes on a different path across the same surface. */
     synth_osc_init(&osc, SR);
-    osc.wave = SYNTH_WAVE_TERRAIN;
+    synth_osc_set_wave(&osc, SYNTH_WAVE_TERRAIN);
     synth_osc_set_terrain(&osc, 0.8f, 1);
     synth_osc_set_freq(&osc, 200.0f);
     for (i = 0; i < ALIAS_FRAMES; ++i) {
@@ -561,7 +615,7 @@ static void test_terrain_ratio_changes_the_waveform(void)
     }
 
     synth_osc_init(&osc, SR);
-    osc.wave = SYNTH_WAVE_TERRAIN;
+    synth_osc_set_wave(&osc, SYNTH_WAVE_TERRAIN);
     synth_osc_set_terrain(&osc, 0.8f, 3);
     synth_osc_set_freq(&osc, 200.0f);
     for (i = 0; i < ALIAS_FRAMES; ++i) {
@@ -888,7 +942,7 @@ static float subharmonic_floor(synth_wave_t wave, float f0, float knee)
     int i;
 
     synth_osc_init(&osc, SR);
-    osc.wave = wave;
+    synth_osc_set_wave(&osc, wave);
     synth_osc_set_pd_knee(&osc, knee);
     synth_osc_set_vosim(&osc, 3000.0f, 3, 0.7f);
     synth_osc_set_terrain(&osc, 0.9f, 3);
@@ -953,7 +1007,7 @@ static void test_phase_distortion_still_bends_at_playable_pitches(void)
     /* Widening the knee must not flatten the effect where it matters: at a bass
        note there is room for the tight knee the host asked for. */
     synth_osc_init(&osc, SR);
-    osc.wave = SYNTH_WAVE_PD;
+    synth_osc_set_wave(&osc, SYNTH_WAVE_PD);
     synth_osc_set_pd_knee(&osc, 0.05f);
     synth_osc_set_freq(&osc, 110.0f);
     CHECK_NEAR(osc.pd_knee, 0.05f, 1e-6f);
@@ -964,7 +1018,7 @@ static void test_phase_distortion_still_bends_at_playable_pitches(void)
     /* Against the same oscillator at a neutral knee, which is a plain sine, so
        the comparison is the effect itself rather than the probe's leakage. */
     synth_osc_init(&osc, SR);
-    osc.wave = SYNTH_WAVE_PD;
+    synth_osc_set_wave(&osc, SYNTH_WAVE_PD);
     synth_osc_set_pd_knee(&osc, 0.5f);
     synth_osc_set_freq(&osc, 110.0f);
     for (i = 0; i < ALIAS_FRAMES; ++i) {
@@ -2036,7 +2090,7 @@ static void test_noise_is_interpolated_not_stepped(void)
        this the prototype's RedNoise instead of sample-and-hold: at a low note
        every step is tiny, where holding would sit still and then jump. */
     synth_osc_init(&osc, SR);
-    osc.wave = SYNTH_WAVE_NOISE;
+    synth_osc_set_wave(&osc, SYNTH_WAVE_NOISE);
     synth_osc_set_freq(&osc, 80.0f);
     previous = synth_osc_next(&osc);
 
@@ -2122,7 +2176,7 @@ static void test_noise_seed_never_gets_stuck(void)
     /* xorshift stays at zero forever if it ever reaches it, so a zero seed has
        to be refused rather than accepted into silence. */
     synth_osc_init(&osc, SR);
-    osc.wave = SYNTH_WAVE_NOISE;
+    synth_osc_set_wave(&osc, SYNTH_WAVE_NOISE);
     synth_osc_set_noise_seed(&osc, 0u);
     synth_osc_set_freq(&osc, 4000.0f);
     for (i = 0; i < 2048; ++i) {
@@ -3171,6 +3225,29 @@ static int env_attack_samples(float sample_rate, int retune)
    and a whole-voice comparison is fair. If any unit a parameter reaches were
    missing from the note_on path, this is where it would show: the parameter
    would be in the engine and not in the voice that played it. */
+/* A waveform's derived state is kept current only while that waveform is the one
+   selected — deriving both of the pitch-dependent ones on every retune cost 10%
+   of a modulated render loop, and nothing reads the one that is not playing. So
+   a voice that has passed through VOSIM carries its old pulse layout until VOSIM
+   is selected again and synth_osc_set_wave() derives it afresh. Two voices that
+   agree on everything audible can differ there, and this is what "everything
+   audible" means. */
+static void forget_unselected_waveforms(synth_voice_t *v)
+{
+    if (v->osc.wave != SYNTH_WAVE_VOSIM) {
+        v->osc.pulse_rate = 0.0f;
+        v->osc.vosim_dc = 0.0f;
+        v->osc.vosim_fitting = 0;
+    }
+    if (v->osc.wave != SYNTH_WAVE_PD) {
+        v->osc.pd_knee = 0.0f;
+        v->osc.pd_rise = 0.0f;
+        v->osc.pd_fall = 0.0f;
+        v->osc.pd_scale = 0.0f;
+        v->osc.pd_offset = 0.0f;
+    }
+}
+
 static void test_a_note_played_after_an_edit_matches_one_playing_during_it(void)
 {
     static float later[256], during[256];
@@ -3179,6 +3256,7 @@ static void test_a_note_played_after_an_edit_matches_one_playing_during_it(void)
     for (w = 0; w < SYNTH_WAVE_COUNT; ++w) {
         for (p = 0; p < SYNTH_PARAM_COUNT; ++p) {
             synth_t a, b;
+            synth_voice_t live_a, live_b;
             float before = synth_param_info((synth_param_t)p)->default_norm;
             float after = (before > 0.5f) ? 0.2f : 0.8f;
 
@@ -3196,7 +3274,13 @@ static void test_a_note_played_after_an_edit_matches_one_playing_during_it(void)
             synth_note_on(&b, 55, 0.8f);
             synth_set_param(&b, (synth_param_t)p, after);
 
-            if (memcmp(&a.voices[0], &b.voices[0], sizeof a.voices[0]) != 0) {
+            /* On copies: the engines are rendered below, and a test that edited
+               them first would be comparing audio it had touched. */
+            live_a = a.voices[0];
+            live_b = b.voices[0];
+            forget_unselected_waveforms(&live_a);
+            forget_unselected_waveforms(&live_b);
+            if (memcmp(&live_a, &live_b, sizeof live_a) != 0) {
                 printf("FAIL %s:%d: parameter %d reaches a sounding voice but not"
                        " a note_on, on wave %d\n", __FILE__, __LINE__, p, w);
                 ++g_failures;
@@ -3630,6 +3714,7 @@ int main(void)
     test_vosim_is_centred_and_bounded();
     test_vosim_decay_shapes_the_burst();
     test_vosim_pulses_cannot_overflow_the_period();
+    test_switching_to_a_waveform_derives_it_at_the_pitch_it_finds();
     test_terrain_is_centred_and_bounded();
     test_terrain_radius_changes_the_spectrum();
     test_every_voice_shares_one_terrain_cross_section();

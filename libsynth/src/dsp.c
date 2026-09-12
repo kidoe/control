@@ -243,12 +243,37 @@ void synth_osc_init(synth_osc_t *osc, float sample_rate)
     synth_osc_set_pd_knee(osc, 0.5f);
     synth_osc_set_terrain(osc, 0.7f, 1);
     synth_osc_set_noise_seed(osc, 0x9E3779B9u);
+    /* Both derivations once here, whatever the waveform, so that every field is
+       defined before anything can read one. After this they are kept up to date
+       only while their waveform is selected. */
     vosim_update(osc);
+    pd_update(osc);
 }
 
 void synth_osc_reset(synth_osc_t *osc)
 {
     osc->phase = 0.0f;
+}
+
+/* The two waveforms with pitch-dependent derivations, and the one place that
+   says so. Neither result is read by any other waveform, and both are recomputed
+   on every retune — which with vibrato or a pitch envelope is every voice at
+   control rate — so computing the one that is selected rather than both is 10%
+   of the render loop on a modulated patch. What keeps it correct is that the
+   waveform cannot change without synth_osc_set_wave() deriving it then. */
+static void osc_derive_for_wave(synth_osc_t *osc)
+{
+    if (osc->wave == SYNTH_WAVE_VOSIM) {
+        vosim_update(osc);
+    } else if (osc->wave == SYNTH_WAVE_PD) {
+        pd_update(osc); /* the usable knee depends on the pitch */
+    }
+}
+
+void synth_osc_set_wave(synth_osc_t *osc, synth_wave_t wave)
+{
+    osc->wave = wave;
+    osc_derive_for_wave(osc);
 }
 
 void synth_osc_set_freq(synth_osc_t *osc, float hz)
@@ -261,8 +286,7 @@ void synth_osc_set_freq(synth_osc_t *osc, float hz)
         inc = 0.49f;
     }
     osc->phase_inc = inc;
-    vosim_update(osc);
-    pd_update(osc); /* the usable knee depends on the pitch */
+    osc_derive_for_wave(osc);
 }
 
 /* The warp squeezes a half cycle of sine into the fraction of the period before
@@ -309,7 +333,9 @@ void synth_osc_set_pd_knee(synth_osc_t *osc, float knee)
         knee = 0.98f;
     }
     osc->pd_wanted = knee;
-    pd_update(osc);
+    if (osc->wave == SYNTH_WAVE_PD) {
+        pd_update(osc);
+    }
 }
 
 void synth_osc_set_vosim(synth_osc_t *osc, float formant_hz, int pulses, float decay)
@@ -328,7 +354,9 @@ void synth_osc_set_vosim(synth_osc_t *osc, float formant_hz, int pulses, float d
     osc->formant_hz = (formant_hz > 0.0f) ? formant_hz : 1.0f;
     osc->vosim_pulses = pulses;
     osc->vosim_decay = decay;
-    vosim_update(osc);
+    if (osc->wave == SYNTH_WAVE_VOSIM) {
+        vosim_update(osc);
+    }
 }
 
 /* For a host driving one oscillator directly, and for the tests. An instance

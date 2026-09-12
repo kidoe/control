@@ -201,7 +201,7 @@ rather than asserted, and the ones that are not are labelled.
 - **Measured on emulated silicon**: `tools/bench-arm/run.sh` renders a second
   of audio on QEMU's Cortex-M0 and Cortex-M4F models and counts instructions
   with a TCG plugin, and a second plugin attributes them to functions. Eight
-  voices cost 47.6 M instructions a second on the M4F and 1121 M on the M0 —
+  voices cost 47.2 M instructions a second on the M4F and 1121 M on the M0 —
   soft float is about 24x the whole render loop, not the modest per-call tax
   the symbol list suggests. So an M4F-class part runs eight voices in under a
   third of a 168 MHz core, while an RP2040 needs 1.2 cores for one voice.

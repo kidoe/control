@@ -91,13 +91,13 @@ away for convenience.
   | 8 voices, no events | 105,235 | 31.3% |
   | 8 voices, one parameter change | 106,972 | 31.8% |
   | 8 voices, 16 parameter changes | 132,634 | 39.5% |
-  | 8 voices, every parameter as an event | 263,515 | 78.4% |
-  | 8 voices, a whole patch adopted | 219,135 | 65.2% |
-  | 8 voices, 8 notes starting | 119,147 | 35.5% |
-  | 8 voices, 16 notes starting | 134,884 | 40.1% |
+  | 8 voices, every parameter as an event | 254,015 | 75.6% |
+  | 8 voices, a whole patch adopted | 209,595 | 62.4% |
+  | 8 voices, 8 notes starting | 117,865 | 35.1% |
+  | 8 voices, 16 notes starting | 132,280 | 39.4% |
   | 4 instances mixed, 2 voices each | 127,584 | 38.0% |
   | 4 instances mixed, every slot full | 420,670 | 125.2% |
-  | 4 instances, all four adopt a patch | 245,579 | 73.1% |
+  | 4 instances, all four adopt a patch | 234,219 | 69.7% |
   | 4 instances mixed, all silent | 29,791 | 8.9% |
 
   The instance rows are the same arithmetic seen from the other side: the same
@@ -156,7 +156,12 @@ away for convenience.
 - **What reaches nothing is not computed.** This is the rule the library keeps
   finding new places to apply: a modulation depth at its centre, a parameter
   change aimed at a voice slot nobody can hear, a wave terrain's cross-section
-  when the terrain is not the selected waveform.
+  when the terrain is not the selected waveform, and the two waveform
+  derivations that follow the pitch — the VOSIM pulse layout and the phase
+  distortion's knee — when their waveform is not the one playing. That last one
+  is 12% of a vibrato patch on an M4F and 18% on an M0, because a retune happens
+  per voice at control rate and both were being recomputed whatever was
+  selected.
 
   For modulation it works because every depth in the library is bipolar and
   neutral at its centre, so "does this reach anything" is one comparison, and it
@@ -254,7 +259,10 @@ order the units are actually wired in `synth_render()`.
   pure function of phase; noise draws a random value each cycle and interpolates
   across it, so the note sets its bandwidth and a high one gives hi-hats. Each
   voice is seeded from its index, which keeps unison voices uncorrelated without
-  making a render unrepeatable. Wave terrain is the one waveform whose settings
+  making a render unrepeatable. A waveform's derived settings are kept current
+  only while that waveform is the one selected — `synth_osc_set_wave()` is what
+  brings the new one up to date, and assigning the field directly is a mistake
+  the header warns about. Wave terrain is the one waveform whose settings
   cost real work to derive — a lap of the orbit to find its mean and its peak,
   since an arbitrary surface is neither centred nor bounded by 1, which is 21,545
   instructions. So that derivation belongs to the instance rather than to the
@@ -279,12 +287,10 @@ order the units are actually wired in `synth_render()`.
   the sweep is a tuned beep. Negative amounts sweep up onto the note instead.
   Its amount ships centred, so it is silent in every patch that predates it, and
   the envelope is not advanced while it is. With it switched on, 8 voices go
-  from 47.6 to 74.2 million instructions a second on a Cortex-M4F, which is 7%
-  dearer than vibrato there because it also runs an envelope per voice per
-  sample to decide where to move the pitch to. On a Cortex-M0 that ordering
-  reverses and it is the cheapest of the three, within the 2% the modulations
-  span: once every arithmetic operation is a function call, which modulation it
-  is barely matters.
+  from 47.2 to 65.8 million instructions a second on a Cortex-M4F, 9% dearer
+  than vibrato because it also runs an envelope per voice per sample to decide
+  where to move the pitch to. On a Cortex-M0 the two are within a per cent of
+  each other, and both are a fifth cheaper than moving the cutoff instead.
 - **Glide**: portamento, in seconds, linear in semitones so the time is the
   same whatever the interval. A note starts on the pitch of the one played
   before it and travels; the first note of a session has nothing to come from
@@ -388,12 +394,12 @@ Be honest about this line; a lot of it cannot be checked from a container.
   | instructions per second of audio | M4F | M0 |
   |---|---|---|
   | silent, 8 empty slots | 3.8 M | 12.6 M |
-  | sine, 1 voice | 9.3 M | 152 M |
-  | sine, 8 voices | 47.6 M | 1121 M |
-  | saw, 8 voices | 47.2 M | 895 M |
-  | sine, 8 voices + filter LFO | 69.6 M | 1855 M |
-  | sine, 8 voices + vibrato | 69.3 M | 1868 M |
-  | sine, 8 voices + pitch sweep | 74.2 M | 1846 M |
+  | sine, 1 voice | 9.2 M | 152 M |
+  | sine, 8 voices | 47.2 M | 1121 M |
+  | saw, 8 voices | 46.8 M | 895 M |
+  | sine, 8 voices + filter LFO | 69.2 M | 1855 M |
+  | sine, 8 voices + vibrato | 60.6 M | 1532 M |
+  | sine, 8 voices + pitch sweep | 65.8 M | 1522 M |
 
   Read these as a floor. QEMU counts instructions retired, not cycles, and
   models neither flash wait states nor the multi-cycle loads and taken branches
@@ -410,7 +416,7 @@ Be honest about this line; a lot of it cannot be checked from a container.
     per call" a reader might assume from the symbol list — twenty-four times
     the whole render loop.
   - **M4F-class hardware is the supported target, and now with a number.**
-    47.6 M instructions a second for 8 voices is 28% of a 168 MHz STM32F405 at
+    47.2 M instructions a second for 8 voices is 28% of a 168 MHz STM32F405 at
     one instruction per cycle. Since that is a floor, treat 8 voices as usable
     and leave room for whatever else the firmware does.
   - **The Pico is close but not there.** A single sine voice needs 152 M
